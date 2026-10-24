@@ -95,3 +95,4 @@ iOSInjectionProject/
 # for Firebase
 **/GoogleService-Info.plist
 
+.swiftpm/

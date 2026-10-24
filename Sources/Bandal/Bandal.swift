@@ -73,7 +73,7 @@ public enum DataValue: Hashable, Sendable, Codable,
         return nil
     }
 
-    /// `true` when the cell is `.missing`.
+        /// `true` when the cell is `.missing`.
     public var isMissing: Bool {
         self == .missing
     }
@@ -340,19 +340,41 @@ public struct DataRow: Equatable, Hashable, Sendable, Codable, CustomStringConve
 
 struct DataColumn: Equatable, Hashable, Sendable, Codable {
     let name: String
-    let values: [DataValue]
+    let storage: any AnyColumn
     let numericBuffer: NumericBuffer?
+    private let _cachedValues: [DataValue]?
+
+    var values: [DataValue] {
+        if let cached = _cachedValues { return cached }
+        return storage.toDataValues()
+    }
+
+    init(storage: any AnyColumn) {
+        self.name = storage.name
+        self.storage = storage
+        if let floatCol = storage as? Float64Column {
+            self.numericBuffer = NumericBuffer(
+                values: Array(floatCol.values),
+                isMissing: (0..<floatCol.count).map { floatCol.nullBitmap[$0] }
+            )
+        } else {
+            self.numericBuffer = nil
+        }
+        self._cachedValues = nil
+    }
 
     init(name: String, values: [DataValue]) {
         self.name = name
-        self.values = values
+        self.storage = AnyColumnFactory.make(name: name, values: values)
         self.numericBuffer = NumericBuffer(dataValues: values)
+        self._cachedValues = values
     }
 
     init(name: String, numbers: [Double]) {
         self.name = name
-        self.values = numbers.map(DataValue.number)
+        self.storage = Float64Column(name: name, numbers: numbers)
         self.numericBuffer = NumericBuffer(numbers: numbers)
+        self._cachedValues = numbers.map(DataValue.number)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -406,6 +428,13 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     /// Empty or entirely missing columns have type `.unknown`; columns with
     /// more than one concrete value type have type `.mixed`.
     public func dataType(of name: String) throws -> DataType {
+        guard let col = columns.first(where: { $0.name == name }) else {
+            throw DataFrameError.columnNotFound(name)
+        }
+        let type = col.storage.dataType
+        if type != .unknown && type != .mixed {
+            return type
+        }
         let values = try values(in: name)
         var types = Set<DataType>()
         for value in values where value != .missing {
@@ -514,19 +543,49 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
         self.columnNames = columns.map(\.name)
     }
 
+    init(storageColumns: [any AnyColumn]) throws {
+        guard !storageColumns.isEmpty else {
+            throw DataFrameError.emptyColumns
+        }
+        var names = Set<String>()
+        for column in storageColumns {
+            guard !column.name.isEmpty else {
+                throw DataFrameError.emptyColumnName
+            }
+            guard names.insert(column.name).inserted else {
+                throw DataFrameError.duplicateColumnName(column.name)
+            }
+        }
+        let expectedCount = storageColumns[0].count
+        for column in storageColumns {
+            guard column.count == expectedCount else {
+                throw DataFrameError.unequalColumnLengths(
+                    column: column.name,
+                    expected: expectedCount,
+                    actual: column.count
+                )
+            }
+        }
+        self.columns = storageColumns.map { DataColumn(storage: $0) }
+        self.rowCount = expectedCount
+        self.columnNames = storageColumns.map(\.name)
+    }
+
     func rows(in range: Range<Int>) throws -> DataFrame {
         try DataFrame(
-            columns: columns.map {
-                (name: $0.name, values: Array($0.values[range]))
-            }
+            storageColumns: columns.map { $0.storage.slice(range: range) }
         )
     }
 
     func rows(at indices: [Int]) throws -> DataFrame {
         try DataFrame(
-            columns: columns.map { column in
-                (name: column.name, values: indices.map { column.values[$0] })
-            }
+            storageColumns: columns.map { $0.storage.slice(at: indices) }
+        )
+    }
+
+    func rows(matching mask: BitSet) throws -> DataFrame {
+        try DataFrame(
+            storageColumns: columns.map { $0.storage.slice(mask: mask) }
         )
     }
 }

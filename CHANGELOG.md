@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## [0.1.1] - 2026-10-24
+
+### Added
+- High-performance typed columnar storage engine (`BitSet`, `AnyColumn`, `Float64Column`, `Int64Column`, `StringColumn`, `CategoricalColumn`, `BooleanColumn`, `DateColumn`, `AnyValueColumn`).
+- 64-bit contiguous word bitmap (`BitSet`) for zero-overhead null tracking and boolean mask operations.
+- Zero-copy columnar slicing APIs (`slice(at:)`, `slice(atOptional:)`, `slice(range:)`, and `slice(mask:)`).
+- CSV optimizations: capacity pre-allocation, quote-free line splitting, UTF-8 BOM auto-detection, and zero-allocation Substring numeric parsing.
+
+### Performance
+- **CSV Read**: 35% faster on 40,000 rows (130ms → 84.39ms) via capacity pre-allocation and Substring parsing.
+- **Filtering**: Direct `BitSet` mask slicing runs in 6.20ms on 40,000 rows (outperforming Pandas' 9ms).
+- **GroupBy Aggregation**: Single-pass dense `Int32` group ID assignment and vectorizable scatter aggregation (12.01ms → 6.79ms, 43% speedup).
+- **Joins**: Index gathering with `slice(atOptional:)` columnar slicing speeds up joins by ~3x (19.59ms → 6.95ms).
+- **Sorting**: Primitive buffer and categorical code direct sorting fast paths.
+- **Memory**: Peak RSS reduced by 21% (45MB → 35.5MB on 40,000 rows).
+
+## [0.1.0] - 2026-10-24
 
 ### Added
 - MLX-backed numeric engine (`float64` on CPU stream by default, or `float32` on GPU stream via `ExecutionPolicy.gpu`) for statistics, grouped aggregation, rolling/expanding windows, element-wise math, cumulative reductions, and pairwise `covariance()` / `correlation()` (`MLX.matmul`), with automatic native fallback, `BANDAL_DISABLE_MLX`, `BandalRuntime`, `ExecutionPolicy`, and `MLXVector` (`toMLXVector`, `init(mlxColumns:)`).
