@@ -33,7 +33,7 @@ Add Bandal to your `Package.swift` dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/NeuroAssociates/bandal.git", from: "0.1.0"),
+    .package(url: "https://github.com/NeuroAssociates/Bandal.git", from: "0.1.0"),
 ],
 targets: [
     .target(
