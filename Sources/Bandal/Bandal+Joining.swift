@@ -24,65 +24,70 @@ extension DataFrame {
             rightRowsByKey[value, default: []].append(index)
         }
 
-        var result = columns.map { (name: $0.name, values: [DataValue]()) }
         let additionalColumns = other.columns.filter { $0.name != key }
-        result.append(contentsOf: additionalColumns.map {
-            (name: $0.name, values: [DataValue]())
-        })
+        var leftIndices: [Int?] = []
+        var rightIndices: [Int?] = []
+        leftIndices.reserveCapacity(rowCount)
+        rightIndices.reserveCapacity(rowCount)
 
         var matchedRightRows = Set<Int>()
         for leftIndex in 0..<rowCount {
-            let matches = rightRowsByKey[leftKeys[leftIndex]] ?? []
+            let leftKey = leftKeys[leftIndex]
+            if leftKey == .missing {
+                if kind == .left || kind == .full {
+                    leftIndices.append(leftIndex)
+                    rightIndices.append(nil)
+                }
+                continue
+            }
+            let matches = rightRowsByKey[leftKey] ?? []
             if matches.isEmpty {
                 guard kind == .left || kind == .full else { continue }
-                append(
-                    leftIndex: leftIndex,
-                    rightIndex: nil,
-                    additionalColumns: additionalColumns,
-                    to: &result
-                )
+                leftIndices.append(leftIndex)
+                rightIndices.append(nil)
             } else {
                 for rightIndex in matches {
                     matchedRightRows.insert(rightIndex)
-                    append(
-                        leftIndex: leftIndex,
-                        rightIndex: rightIndex,
-                        additionalColumns: additionalColumns,
-                        to: &result
-                    )
+                    leftIndices.append(leftIndex)
+                    rightIndices.append(rightIndex)
                 }
             }
         }
 
         if kind == .right || kind == .full {
             for rightIndex in rightKeys.indices where !matchedRightRows.contains(rightIndex) {
-                for columnIndex in columns.indices {
-                    result[columnIndex].values.append(
-                        columns[columnIndex].name == key ? rightKeys[rightIndex] : .missing
-                    )
-                }
-                for (offset, column) in additionalColumns.enumerated() {
-                    result[columns.count + offset].values.append(column.values[rightIndex])
-                }
+                leftIndices.append(nil)
+                rightIndices.append(rightIndex)
             }
         }
-        return try DataFrame(columns: result)
-    }
 
-    private func append(
-        leftIndex: Int,
-        rightIndex: Int?,
-        additionalColumns: [DataColumn],
-        to result: inout [(name: String, values: [DataValue])]
-    ) {
-        for (columnIndex, column) in columns.enumerated() {
-            result[columnIndex].values.append(column.values[leftIndex])
+        var storageCols: [any AnyColumn] = []
+        storageCols.reserveCapacity(columns.count + additionalColumns.count)
+
+        for col in columns {
+            if col.name == key && (kind == .right || kind == .full) {
+                var vals: [DataValue] = []
+                vals.reserveCapacity(leftIndices.count)
+                for i in 0..<leftIndices.count {
+                    if let lIdx = leftIndices[i] {
+                        vals.append(col.storage.value(at: lIdx))
+                    } else if let rIdx = rightIndices[i] {
+                        vals.append(rightKeys[rIdx])
+                    } else {
+                        vals.append(.missing)
+                    }
+                }
+                storageCols.append(AnyColumnFactory.make(name: col.name, values: vals))
+            } else {
+                storageCols.append(col.storage.slice(atOptional: leftIndices))
+            }
         }
-        for (offset, column) in additionalColumns.enumerated() {
-            result[columns.count + offset].values.append(
-                rightIndex.map { column.values[$0] } ?? .missing
-            )
+
+        for col in additionalColumns {
+            storageCols.append(col.storage.slice(atOptional: rightIndices))
         }
+
+        return try DataFrame(storageColumns: storageCols)
     }
 }
 

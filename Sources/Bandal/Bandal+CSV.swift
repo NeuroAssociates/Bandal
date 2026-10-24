@@ -240,6 +240,8 @@ extension DataFrame {
             throw DataFrameError.invalidCSV(error.localizedDescription)
         }
         defer { try? file.close() }
+        let fileSize: UInt64 = (try? file.seekToEnd()) ?? 0
+        try? file.seek(toOffset: 0)
 
         var names: [String]?
         var selectedNames: [String] = []
@@ -255,15 +257,23 @@ extension DataFrame {
         var finished = false
 
         func processRecord() throws {
-            let decoded: String
-            if let string = String(bytes: recordBytes, encoding: .utf8) {
-                decoded = string
-            } else {
+            if recordNumber == 0 && recordBytes.starts(with: [0xEF, 0xBB, 0xBF]) {
+                recordBytes.removeFirst(3)
+            }
+            guard let decoded = String(bytes: recordBytes, encoding: .utf8) else {
                 throw DataFrameError.invalidCSV("input is not valid UTF-8")
             }
-            let parsedRecords = try parseCSVRecord(decoded, delimiterByte: delimiterByte)
+            let hasQuotes = recordBytes.contains(0x22)
             recordBytes = []
-            guard let record = parsedRecords.first else { return }
+            let record: [Substring]
+            if !hasQuotes {
+                let delimChar = Character(UnicodeScalar(delimiterByte))
+                record = decoded.split(separator: delimChar, omittingEmptySubsequences: false)
+            } else {
+                let parsedRecords = try parseCSVRecord(decoded, delimiterByte: delimiterByte)
+                guard let first = parsedRecords.first else { return }
+                record = first.map { Substring($0) }
+            }
             recordNumber += 1
 
             if names == nil {
@@ -277,7 +287,7 @@ extension DataFrame {
                     }
                     resolvedNames = configuredNames
                 } else if options.hasHeader {
-                    resolvedNames = record
+                    resolvedNames = record.map(String.init)
                 } else {
                     resolvedNames = (0..<fieldCount).map { "column_\($0)" }
                 }
@@ -310,7 +320,12 @@ extension DataFrame {
                     selectedIndices.append(index)
                 }
                 names = resolvedNames
-                values = Array(repeating: [], count: selectedNames.count)
+                let estimatedRows = options.maximumRows ?? (fileSize > 0 ? max(100, Int(fileSize / 40)) : 100)
+                values = (0..<selectedNames.count).map { _ in
+                    var col = [DataValue]()
+                    col.reserveCapacity(estimatedRows)
+                    return col
+                }
 
                 if !options.hasHeader {
                     try appendDataRecord(record)
@@ -324,7 +339,7 @@ extension DataFrame {
             try appendDataRecord(record)
         }
 
-        func appendDataRecord(_ record: [String]) throws {
+        func appendDataRecord(_ record: [Substring]) throws {
             guard let names else { return }
             guard record.count == names.count else {
                 throw DataFrameError.invalidCSV(
@@ -422,38 +437,57 @@ extension DataFrame {
     }
 
     private static func inferValue(
-        _ rawValue: String,
+        _ rawValue: Substring,
         missingTokens: Set<String>,
         infersNumbers: Bool,
         columnType: DataType?,
         dateFormat: String?
     ) throws -> DataValue {
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !missingTokens.contains(value) else { return .missing }
+        var sub = rawValue
+        while let first = sub.first, first.isWhitespace {
+            sub.removeFirst()
+        }
+        while let last = sub.last, last.isWhitespace {
+            sub.removeLast()
+        }
+        if sub.isEmpty {
+            if missingTokens.contains("") { return .missing }
+            if let columnType, columnType == .string { return .string("") }
+        }
         if let columnType {
             switch columnType {
             case .number:
-                let normalized = value
+                if let number = Double(sub), number.isFinite {
+                    return .number(number)
+                }
+                let strVal = String(sub)
+                guard !missingTokens.contains(strVal) else { return .missing }
+                let normalized = strVal
                     .replacingOccurrences(of: ",", with: "")
                     .replacingOccurrences(of: "$", with: "")
                 guard let number = Double(normalized), number.isFinite else {
-                    throw DataFrameError.invalidCSV("cannot parse '\(value)' as number")
+                    throw DataFrameError.invalidCSV("cannot parse '\(strVal)' as number")
                 }
                 return .number(number)
             case .string:
-                return .string(value)
+                let strVal = String(sub)
+                guard !missingTokens.contains(strVal) else { return .missing }
+                return .string(strVal)
             case .boolean:
-                switch value.lowercased() {
+                let strVal = String(sub)
+                guard !missingTokens.contains(strVal) else { return .missing }
+                switch strVal.lowercased() {
                 case "true": return .boolean(true)
                 case "false": return .boolean(false)
-                default: throw DataFrameError.invalidCSV("cannot parse '\(value)' as Boolean")
+                default: throw DataFrameError.invalidCSV("cannot parse '\(strVal)' as Boolean")
                 }
             case .date:
-                let date = dateFormat.flatMap { parseDate(value, format: $0) }
-                    ?? (dateFormat == nil ? ISO8601DateFormatter().date(from: value) : nil)
-                guard let date
-                else {
-                    throw DataFrameError.invalidCSV("cannot parse '\(value)' as date")
+                let strVal = String(sub)
+                guard !missingTokens.contains(strVal) else { return .missing }
+                let date = dateFormat.flatMap { parseDate(strVal, format: $0) }
+                    ?? (dateFormat == nil ? ISO8601DateFormatter().date(from: strVal) : nil)
+                guard let date else {
+                    throw DataFrameError.invalidCSV("cannot parse '\(strVal)' as date")
                 }
                 return .date(date)
             case .mixed, .unknown:
@@ -462,14 +496,19 @@ extension DataFrame {
                 )
             }
         }
-        guard infersNumbers else { return .string(value) }
-        let normalized = value
+        if infersNumbers, let number = Double(sub), number.isFinite {
+            return .number(number)
+        }
+        let strVal = String(sub)
+        guard !missingTokens.contains(strVal) else { return .missing }
+        guard infersNumbers else { return .string(strVal) }
+        let normalized = strVal
             .replacingOccurrences(of: ",", with: "")
             .replacingOccurrences(of: "$", with: "")
         if let number = Double(normalized), number.isFinite {
             return .number(number)
         }
-        return .string(value)
+        return .string(strVal)
     }
 
     private static func csvDelimiterByte(_ delimiter: Character) throws -> UInt8 {

@@ -27,6 +27,178 @@ extension DataFrame {
         aggregations: [Aggregation]
     ) throws -> DataFrame {
         guard !aggregations.isEmpty else { throw DataFrameError.emptyColumns }
+
+        if keys.count == 1, let keyCol = columns.first(where: { $0.name == keys[0] }) {
+            var groupIndexByKey: [DataValue: Int] = [:]
+            var uniqueKeyValues: [DataValue] = []
+            var groupIds = ContiguousArray<Int32>(repeating: -1, count: rowCount)
+
+            for row in 0..<rowCount {
+                let v = keyCol.storage.value(at: row)
+                if v == .missing { continue }
+                if let gid = groupIndexByKey[v] {
+                    groupIds[row] = Int32(gid)
+                } else {
+                    let gid = uniqueKeyValues.count
+                    groupIndexByKey[v] = gid
+                    uniqueKeyValues.append(v)
+                    groupIds[row] = Int32(gid)
+                }
+            }
+
+            let sortedGroupIndices = (0..<uniqueKeyValues.count).sorted {
+                isOrderedBefore(uniqueKeyValues[$0], uniqueKeyValues[$1])
+            }
+            var remap = [Int32](repeating: -1, count: uniqueKeyValues.count)
+            for (sortedIdx, oldIdx) in sortedGroupIndices.enumerated() {
+                remap[oldIdx] = Int32(sortedIdx)
+            }
+            let sortedKeys = sortedGroupIndices.map { uniqueKeyValues[$0] }
+            let groupCount = sortedKeys.count
+
+            for row in 0..<rowCount {
+                let old = groupIds[row]
+                if old >= 0 {
+                    groupIds[row] = remap[Int(old)]
+                }
+            }
+
+            var outputColumns: [(name: String, values: [DataValue])] = [
+                (name: keys[0], values: sortedKeys)
+            ]
+
+            var groupRows: [[Int]]? = nil
+
+            for aggregation in aggregations {
+                let name = "\(aggregation.column)_\(aggregation.function.name)"
+                guard let targetCol = columns.first(where: { $0.name == aggregation.column }) else {
+                    throw DataFrameError.columnNotFound(aggregation.column)
+                }
+
+                if let fCol = targetCol.storage as? Float64Column {
+                    switch aggregation.function {
+                    case .sum:
+                        var sums = ContiguousArray<Double>(repeating: 0.0, count: groupCount)
+                        var counts = ContiguousArray<Int>(repeating: 0, count: groupCount)
+                        let vals = fCol.values
+                        let nulls = fCol.nullBitmap
+                        for row in 0..<rowCount {
+                            let gid = Int(groupIds[row])
+                            if gid >= 0 && !nulls[row] {
+                                sums[gid] += vals[row]
+                                counts[gid] += 1
+                            }
+                        }
+                        var res: [DataValue] = []
+                        res.reserveCapacity(groupCount)
+                        for gid in 0..<groupCount {
+                            res.append(counts[gid] > 0 ? .number(sums[gid]) : .missing)
+                        }
+                        outputColumns.append((name: name, values: res))
+                        continue
+                    case .count:
+                        var counts = ContiguousArray<Int>(repeating: 0, count: groupCount)
+                        let nulls = fCol.nullBitmap
+                        for row in 0..<rowCount {
+                            let gid = Int(groupIds[row])
+                            if gid >= 0 && !nulls[row] {
+                                counts[gid] += 1
+                            }
+                        }
+                        outputColumns.append((name: name, values: counts.map { .number(Double($0)) }))
+                        continue
+                    case .mean:
+                        var sums = ContiguousArray<Double>(repeating: 0.0, count: groupCount)
+                        var counts = ContiguousArray<Int>(repeating: 0, count: groupCount)
+                        let vals = fCol.values
+                        let nulls = fCol.nullBitmap
+                        for row in 0..<rowCount {
+                            let gid = Int(groupIds[row])
+                            if gid >= 0 && !nulls[row] {
+                                sums[gid] += vals[row]
+                                counts[gid] += 1
+                            }
+                        }
+                        var means: [DataValue] = []
+                        means.reserveCapacity(groupCount)
+                        for gid in 0..<groupCount {
+                            if counts[gid] > 0 {
+                                means.append(.number(sums[gid] / Double(counts[gid])))
+                            } else {
+                                means.append(.missing)
+                            }
+                        }
+                        outputColumns.append((name: name, values: means))
+                        continue
+                    case .min:
+                        var mins = ContiguousArray<Double>(repeating: .infinity, count: groupCount)
+                        var hasVal = BitSet(count: groupCount)
+                        let vals = fCol.values
+                        let nulls = fCol.nullBitmap
+                        for row in 0..<rowCount {
+                            let gid = Int(groupIds[row])
+                            if gid >= 0 && !nulls[row] {
+                                let v = vals[row]
+                                if v < mins[gid] { mins[gid] = v }
+                                hasVal[gid] = true
+                            }
+                        }
+                        var res: [DataValue] = []
+                        res.reserveCapacity(groupCount)
+                        for gid in 0..<groupCount {
+                            res.append(hasVal[gid] ? .number(mins[gid]) : .missing)
+                        }
+                        outputColumns.append((name: name, values: res))
+                        continue
+                    case .max:
+                        var maxs = ContiguousArray<Double>(repeating: -.infinity, count: groupCount)
+                        var hasVal = BitSet(count: groupCount)
+                        let vals = fCol.values
+                        let nulls = fCol.nullBitmap
+                        for row in 0..<rowCount {
+                            let gid = Int(groupIds[row])
+                            if gid >= 0 && !nulls[row] {
+                                let v = vals[row]
+                                if v > maxs[gid] { maxs[gid] = v }
+                                hasVal[gid] = true
+                            }
+                        }
+                        var res: [DataValue] = []
+                        res.reserveCapacity(groupCount)
+                        for gid in 0..<groupCount {
+                            res.append(hasVal[gid] ? .number(maxs[gid]) : .missing)
+                        }
+                        outputColumns.append((name: name, values: res))
+                        continue
+                    default:
+                        break
+                    }
+                }
+
+                if groupRows == nil {
+                    var rowsByGroup = [[Int]](repeating: [], count: groupCount)
+                    for row in 0..<rowCount {
+                        let gid = Int(groupIds[row])
+                        if gid >= 0 {
+                            rowsByGroup[gid].append(row)
+                        }
+                    }
+                    groupRows = rowsByGroup
+                }
+
+                let targetValues = targetCol.values
+                let results = try Self.reduceGroups(
+                    targetValues,
+                    columnName: aggregation.column,
+                    groups: groupRows!,
+                    function: aggregation.function
+                )
+                outputColumns.append((name: name, values: results))
+            }
+
+            return try DataFrame(columns: outputColumns)
+        }
+
         let keyColumns = try keys.map { try values(in: $0) }
         let aggregationColumns = try aggregations.map { aggregation in
             try values(in: aggregation.column)
