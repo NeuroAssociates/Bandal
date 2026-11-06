@@ -175,9 +175,26 @@ public final class Float64Column: AnyColumn, @unchecked Sendable {
     ///
     /// - Parameter indices: Positions in `0..<count`; repeats are allowed.
     public func slice(at indices: [Int]) -> any AnyColumn {
+        let n = indices.count
+        if !hasNulls {
+            let newValues = ContiguousArray<Double>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+                values.withUnsafeBufferPointer { inBuf in
+                    indices.withUnsafeBufferPointer { idxBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let idxBase = idxBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        for k in 0..<n {
+                            outBase[k] = inBase[idxBase[k]]
+                        }
+                    }
+                }
+                initCount = n
+            }
+            return Float64Column(name: name, values: newValues, nullBitmap: BitSet(count: n))
+        }
         var newValues = ContiguousArray<Double>()
-        newValues.reserveCapacity(indices.count)
-        var newBitmap = BitSet(count: indices.count)
+        newValues.reserveCapacity(n)
+        var newBitmap = BitSet(count: n)
         for (newIdx, i) in indices.enumerated() {
             newValues.append(values[i])
             if nullBitmap[i] {
@@ -219,6 +236,49 @@ public final class Float64Column: AnyColumn, @unchecked Sendable {
     /// - Parameter mask: A bit set with at least `count` bits.
     public func slice(mask: BitSet) -> any AnyColumn {
         let targetCount = mask.setBitCount
+        if targetCount == 0 {
+            return Float64Column(name: name, values: [], nullBitmap: BitSet(count: 0))
+        }
+        if !hasNulls {
+            let n = count
+            let newValues = ContiguousArray<Double>(unsafeUninitializedCapacity: targetCount) { outBuf, initCount in
+                values.withUnsafeBufferPointer { inBuf in
+                    mask.words.withUnsafeBufferPointer { wordBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let wordBase = wordBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        var outIdx = 0
+                        let fullWords = n >> 6
+                        let wordLimit = Swift.min(fullWords, wordBuf.count)
+                        for wIdx in 0..<wordLimit {
+                            var w = wordBase[wIdx]
+                            let baseRow = wIdx &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                outBase[outIdx] = inBase[baseRow + bit]
+                                outIdx += 1
+                                w &= w &- 1
+                            }
+                        }
+                        if fullWords < wordBuf.count {
+                            var w = wordBase[fullWords]
+                            let baseRow = fullWords &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                let row = baseRow + bit
+                                if row < n {
+                                    outBase[outIdx] = inBase[row]
+                                    outIdx += 1
+                                }
+                                w &= w &- 1
+                            }
+                        }
+                    }
+                }
+                initCount = targetCount
+            }
+            return Float64Column(name: name, values: newValues, nullBitmap: BitSet(count: targetCount))
+        }
         var newValues = ContiguousArray<Double>()
         newValues.reserveCapacity(targetCount)
         var newBitmap = BitSet(count: targetCount)
@@ -302,9 +362,26 @@ public final class Int64Column: AnyColumn, @unchecked Sendable {
     ///
     /// - Parameter indices: Positions in `0..<count`; repeats are allowed.
     public func slice(at indices: [Int]) -> any AnyColumn {
+        let n = indices.count
+        if !hasNulls {
+            let newValues = ContiguousArray<Int64>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+                values.withUnsafeBufferPointer { inBuf in
+                    indices.withUnsafeBufferPointer { idxBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let idxBase = idxBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        for k in 0..<n {
+                            outBase[k] = inBase[idxBase[k]]
+                        }
+                    }
+                }
+                initCount = n
+            }
+            return Int64Column(name: name, values: newValues, nullBitmap: BitSet(count: n))
+        }
         var newValues = ContiguousArray<Int64>()
-        newValues.reserveCapacity(indices.count)
-        var newBitmap = BitSet(count: indices.count)
+        newValues.reserveCapacity(n)
+        var newBitmap = BitSet(count: n)
         for (newIdx, i) in indices.enumerated() {
             newValues.append(values[i])
             if nullBitmap[i] {
@@ -346,6 +423,49 @@ public final class Int64Column: AnyColumn, @unchecked Sendable {
     /// - Parameter mask: A bit set with at least `count` bits.
     public func slice(mask: BitSet) -> any AnyColumn {
         let targetCount = mask.setBitCount
+        if targetCount == 0 {
+            return Int64Column(name: name, values: [], nullBitmap: BitSet(count: 0))
+        }
+        if !hasNulls {
+            let n = count
+            let newValues = ContiguousArray<Int64>(unsafeUninitializedCapacity: targetCount) { outBuf, initCount in
+                values.withUnsafeBufferPointer { inBuf in
+                    mask.words.withUnsafeBufferPointer { wordBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let wordBase = wordBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        var outIdx = 0
+                        let fullWords = n >> 6
+                        let wordLimit = Swift.min(fullWords, wordBuf.count)
+                        for wIdx in 0..<wordLimit {
+                            var w = wordBase[wIdx]
+                            let baseRow = wIdx &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                outBase[outIdx] = inBase[baseRow + bit]
+                                outIdx += 1
+                                w &= w &- 1
+                            }
+                        }
+                        if fullWords < wordBuf.count {
+                            var w = wordBase[fullWords]
+                            let baseRow = fullWords &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                let row = baseRow + bit
+                                if row < n {
+                                    outBase[outIdx] = inBase[row]
+                                    outIdx += 1
+                                }
+                                w &= w &- 1
+                            }
+                        }
+                    }
+                }
+                initCount = targetCount
+            }
+            return Int64Column(name: name, values: newValues, nullBitmap: BitSet(count: targetCount))
+        }
         var newValues = ContiguousArray<Int64>()
         newValues.reserveCapacity(targetCount)
         var newBitmap = BitSet(count: targetCount)
@@ -634,9 +754,26 @@ public final class CategoricalColumn: AnyColumn, @unchecked Sendable {
     ///
     /// - Parameter indices: Positions in `0..<count`; repeats are allowed.
     public func slice(at indices: [Int]) -> any AnyColumn {
+        let n = indices.count
+        if !hasNulls {
+            let newCodes = ContiguousArray<UInt32>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+                codes.withUnsafeBufferPointer { inBuf in
+                    indices.withUnsafeBufferPointer { idxBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let idxBase = idxBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        for k in 0..<n {
+                            outBase[k] = inBase[idxBase[k]]
+                        }
+                    }
+                }
+                initCount = n
+            }
+            return CategoricalColumn(name: name, dictionary: dictionary, codes: newCodes, nullBitmap: BitSet(count: n))
+        }
         var newCodes = ContiguousArray<UInt32>()
-        newCodes.reserveCapacity(indices.count)
-        var newBitmap = BitSet(count: indices.count)
+        newCodes.reserveCapacity(n)
+        var newBitmap = BitSet(count: n)
         for (newIdx, i) in indices.enumerated() {
             newCodes.append(codes[i])
             if nullBitmap[i] {
@@ -678,6 +815,49 @@ public final class CategoricalColumn: AnyColumn, @unchecked Sendable {
     /// - Parameter mask: A bit set with at least `count` bits.
     public func slice(mask: BitSet) -> any AnyColumn {
         let targetCount = mask.setBitCount
+        if targetCount == 0 {
+            return CategoricalColumn(name: name, dictionary: dictionary, codes: [], nullBitmap: BitSet(count: 0))
+        }
+        if !hasNulls {
+            let n = count
+            let newCodes = ContiguousArray<UInt32>(unsafeUninitializedCapacity: targetCount) { outBuf, initCount in
+                codes.withUnsafeBufferPointer { inBuf in
+                    mask.words.withUnsafeBufferPointer { wordBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let wordBase = wordBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        var outIdx = 0
+                        let fullWords = n >> 6
+                        let wordLimit = Swift.min(fullWords, wordBuf.count)
+                        for wIdx in 0..<wordLimit {
+                            var w = wordBase[wIdx]
+                            let baseRow = wIdx &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                outBase[outIdx] = inBase[baseRow + bit]
+                                outIdx += 1
+                                w &= w &- 1
+                            }
+                        }
+                        if fullWords < wordBuf.count {
+                            var w = wordBase[fullWords]
+                            let baseRow = fullWords &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                let row = baseRow + bit
+                                if row < n {
+                                    outBase[outIdx] = inBase[row]
+                                    outIdx += 1
+                                }
+                                w &= w &- 1
+                            }
+                        }
+                    }
+                }
+                initCount = targetCount
+            }
+            return CategoricalColumn(name: name, dictionary: dictionary, codes: newCodes, nullBitmap: BitSet(count: targetCount))
+        }
         var newCodes = ContiguousArray<UInt32>()
         newCodes.reserveCapacity(targetCount)
         var newBitmap = BitSet(count: targetCount)
@@ -923,9 +1103,26 @@ public final class DateColumn: AnyColumn, @unchecked Sendable {
     ///
     /// - Parameter indices: Positions in `0..<count`; repeats are allowed.
     public func slice(at indices: [Int]) -> any AnyColumn {
+        let n = indices.count
+        if !hasNulls {
+            let newValues = ContiguousArray<Double>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+                timeIntervals.withUnsafeBufferPointer { inBuf in
+                    indices.withUnsafeBufferPointer { idxBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let idxBase = idxBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        for k in 0..<n {
+                            outBase[k] = inBase[idxBase[k]]
+                        }
+                    }
+                }
+                initCount = n
+            }
+            return DateColumn(name: name, timeIntervals: newValues, nullBitmap: BitSet(count: n))
+        }
         var newValues = ContiguousArray<Double>()
-        newValues.reserveCapacity(indices.count)
-        var newBitmap = BitSet(count: indices.count)
+        newValues.reserveCapacity(n)
+        var newBitmap = BitSet(count: n)
         for (newIdx, i) in indices.enumerated() {
             newValues.append(timeIntervals[i])
             if nullBitmap[i] {
@@ -969,6 +1166,49 @@ public final class DateColumn: AnyColumn, @unchecked Sendable {
     /// - Parameter mask: A bit set with at least `count` bits.
     public func slice(mask: BitSet) -> any AnyColumn {
         let targetCount = mask.setBitCount
+        if targetCount == 0 {
+            return DateColumn(name: name, timeIntervals: [], nullBitmap: BitSet(count: 0))
+        }
+        if !hasNulls {
+            let n = count
+            let newValues = ContiguousArray<Double>(unsafeUninitializedCapacity: targetCount) { outBuf, initCount in
+                timeIntervals.withUnsafeBufferPointer { inBuf in
+                    mask.words.withUnsafeBufferPointer { wordBuf in
+                        guard let inBase = inBuf.baseAddress,
+                              let wordBase = wordBuf.baseAddress,
+                              let outBase = outBuf.baseAddress else { return }
+                        var outIdx = 0
+                        let fullWords = n >> 6
+                        let wordLimit = Swift.min(fullWords, wordBuf.count)
+                        for wIdx in 0..<wordLimit {
+                            var w = wordBase[wIdx]
+                            let baseRow = wIdx &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                outBase[outIdx] = inBase[baseRow + bit]
+                                outIdx += 1
+                                w &= w &- 1
+                            }
+                        }
+                        if fullWords < wordBuf.count {
+                            var w = wordBase[fullWords]
+                            let baseRow = fullWords &<< 6
+                            while w != 0 {
+                                let bit = w.trailingZeroBitCount
+                                let row = baseRow + bit
+                                if row < n {
+                                    outBase[outIdx] = inBase[row]
+                                    outIdx += 1
+                                }
+                                w &= w &- 1
+                            }
+                        }
+                    }
+                }
+                initCount = targetCount
+            }
+            return DateColumn(name: name, timeIntervals: newValues, nullBitmap: BitSet(count: targetCount))
+        }
         var newValues = ContiguousArray<Double>()
         newValues.reserveCapacity(targetCount)
         var newBitmap = BitSet(count: targetCount)

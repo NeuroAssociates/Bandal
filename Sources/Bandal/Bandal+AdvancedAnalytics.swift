@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 
 // MARK: - Structured Series Description & Quantile Table
@@ -287,13 +288,8 @@ extension Series {
         if target == .missing {
             return BooleanMask(bitSet: storage.nullBitmap)
         }
-        if case .number(let n) = target, let buffer = numericBuffer {
-            let vals = buffer.floatColumn.values
-            let nulls = buffer.floatColumn.nullBitmap
-            for i in 0..<count where !nulls[i] && vals[i] == n {
-                bm[i] = true
-            }
-            return BooleanMask(bitSet: bm)
+        if case .number(let n) = target, numericBuffer != nil {
+            return compareScalar(n) { $0 == $1 }
         }
         for i in 0..<count where storage.value(at: i) == target {
             bm[i] = true
@@ -307,16 +303,79 @@ extension Series {
     }
 
     private func compareScalar(_ rhs: Double, _ predicate: (Double, Double) -> Bool) -> BooleanMask {
-        var bm = BitSet(count: count)
-        if let buffer = numericBuffer {
-            let vals = buffer.floatColumn.values
-            let nulls = buffer.floatColumn.nullBitmap
-            for i in 0..<count where !nulls[i] && predicate(vals[i], rhs) {
-                bm[i] = true
-            }
-            return BooleanMask(bitSet: bm)
+        let n = count
+        if n == 0 {
+            return BooleanMask(bitSet: BitSet())
         }
-        for i in 0..<count {
+        if let buffer = numericBuffer {
+            let wordCount = (n + 63) >> 6
+            let hasNulls = buffer.hasMissing
+            let nullWords = buffer.floatColumn.nullBitmap.words
+            var anyTrue = false
+            let words = ContiguousArray<UInt64>(unsafeUninitializedCapacity: wordCount) { outBuf, initCount in
+                buffer.floatColumn.values.withUnsafeBufferPointer { valBuf in
+                    guard let valBase = valBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                    let fullWords = n >> 6
+                    if !hasNulls {
+                        for w in 0..<fullWords {
+                            let baseIdx = w << 6
+                            var word: UInt64 = 0
+                            for bit in 0..<64 {
+                                if predicate(valBase[baseIdx + bit], rhs) {
+                                    word |= (1 &<< UInt64(bit))
+                                }
+                            }
+                            if word != 0 { anyTrue = true }
+                            outBase[w] = word
+                        }
+                        let rem = n & 63
+                        if rem > 0 {
+                            let baseIdx = fullWords << 6
+                            var word: UInt64 = 0
+                            for bit in 0..<rem {
+                                if predicate(valBase[baseIdx + bit], rhs) {
+                                    word |= (1 &<< UInt64(bit))
+                                }
+                            }
+                            if word != 0 { anyTrue = true }
+                            outBase[fullWords] = word
+                        }
+                    } else {
+                        for w in 0..<fullWords {
+                            let baseIdx = w << 6
+                            let nWord = nullWords[w]
+                            var word: UInt64 = 0
+                            for bit in 0..<64 {
+                                let mask = (1 as UInt64) &<< UInt64(bit)
+                                if (nWord & mask) == 0 && predicate(valBase[baseIdx + bit], rhs) {
+                                    word |= mask
+                                }
+                            }
+                            if word != 0 { anyTrue = true }
+                            outBase[w] = word
+                        }
+                        let rem = n & 63
+                        if rem > 0 {
+                            let baseIdx = fullWords << 6
+                            let nWord = nullWords[fullWords]
+                            var word: UInt64 = 0
+                            for bit in 0..<rem {
+                                let mask = (1 as UInt64) &<< UInt64(bit)
+                                if (nWord & mask) == 0 && predicate(valBase[baseIdx + bit], rhs) {
+                                    word |= mask
+                                }
+                            }
+                            if word != 0 { anyTrue = true }
+                            outBase[fullWords] = word
+                        }
+                    }
+                }
+                initCount = wordCount
+            }
+            return BooleanMask(bitSet: BitSet(words: words, count: n, mayHaveTrueBits: anyTrue))
+        }
+        var bm = BitSet(count: n)
+        for i in 0..<n {
             if case .number(let v) = storage.value(at: i), predicate(v, rhs) {
                 bm[i] = true
             }
@@ -336,30 +395,7 @@ extension Series {
         if let col = NumericEngine.unaryMathColumn(buffer: buffer, name: name, function: function) {
             return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let srcVals = buffer.floatColumn.values
-        var outVals = ContiguousArray<Double>(repeating: 0.0, count: count)
-        var outNulls = buffer.floatColumn.nullBitmap
-        for i in 0..<count where !outNulls[i] {
-            let x = srcVals[i]
-            let y: Double
-            switch function {
-            case .sqrt: y = x >= 0 ? x.squareRoot() : .nan
-            case .exp: y = Foundation.exp(x)
-            case .log: y = x > 0 ? Foundation.log(x) : .nan
-            case .log10: y = x > 0 ? Foundation.log10(x) : .nan
-            case .log1p: y = x > -1 ? Foundation.log1p(x) : .nan
-            case .sin: y = Foundation.sin(x)
-            case .cos: y = Foundation.cos(x)
-            case .tan: y = Foundation.tan(x)
-            case .sign: y = x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0)
-            }
-            if y.isFinite {
-                outVals[i] = y
-            } else {
-                outNulls[i] = true
-            }
-        }
-        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        let col = NumericEngine.nativeUnaryMathColumn(buffer: buffer, name: name, function: function)
         return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
@@ -406,7 +442,7 @@ extension Series {
 
     /// Scales numeric values linearly into `0...1` (`(x - min) / (max - min)`).
     public func minMaxScaled() throws -> Series {
-        guard let buffer = numericBuffer else {
+        guard numericBuffer != nil else {
             throw DataFrameError.nonNumericColumn(name)
         }
         guard let minVal = min(), let maxVal = max(), maxVal > minVal else {

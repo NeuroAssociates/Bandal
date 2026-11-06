@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 import MLX
 
@@ -125,7 +126,17 @@ enum MLXBackend {
         case .gpu:
             return isExactFloat32(values) && values.allSatisfy { Swift.abs($0) <= maxMagnitude }
         case .gpuFloat32:
-            return values.allSatisfy { $0.isFinite && Swift.abs($0) <= maxMagnitude }
+            if values.isEmpty { return true }
+            var minVal = 0.0
+            var maxVal = 0.0
+            values.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                vDSP_minvD(base, 1, &minVal, vDSP_Length(buf.count))
+                vDSP_maxvD(base, 1, &maxVal, vDSP_Length(buf.count))
+            }
+            return minVal.isFinite && maxVal.isFinite
+                && Swift.abs(minVal) <= maxMagnitude
+                && Swift.abs(maxVal) <= maxMagnitude
         default:
             return false
         }
@@ -134,16 +145,28 @@ enum MLXBackend {
     static func shouldUseFloat32GPU(for values: ContiguousArray<Double>, maxMagnitude: Double = 1e6) -> Bool {
         switch policy {
         case .gpu:
-            for value in values {
-                guard value.isFinite else { return false }
-                let f = Float(value)
-                guard f.isFinite, Double(f) == value, Swift.abs(value) <= maxMagnitude else {
-                    return false
+            return values.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return true }
+                for i in 0..<buf.count {
+                    let value = base[i]
+                    guard value.isFinite, Swift.abs(value) <= maxMagnitude else { return false }
+                    let f = Float(value)
+                    guard f.isFinite, Double(f) == value else { return false }
                 }
+                return true
             }
-            return true
         case .gpuFloat32:
-            return values.allSatisfy { $0.isFinite && Swift.abs($0) <= maxMagnitude }
+            if values.isEmpty { return true }
+            var minVal = 0.0
+            var maxVal = 0.0
+            values.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                vDSP_minvD(base, 1, &minVal, vDSP_Length(buf.count))
+                vDSP_maxvD(base, 1, &maxVal, vDSP_Length(buf.count))
+            }
+            return minVal.isFinite && maxVal.isFinite
+                && Swift.abs(minVal) <= maxMagnitude
+                && Swift.abs(maxVal) <= maxMagnitude
         default:
             return false
         }
@@ -152,14 +175,57 @@ enum MLXBackend {
     /// Returns `true` when every value in `values` is finite and losslessly
     /// representable as an IEEE-754 `Float` (`Float32`).
     static func isExactFloat32(_ values: [Double]) -> Bool {
-        for value in values {
-            guard value.isFinite else { return false }
-            let floatValue = Float(value)
-            guard floatValue.isFinite, Double(floatValue) == value else {
-                return false
+        values.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return true }
+            for i in 0..<buf.count {
+                let value = base[i]
+                guard value.isFinite else { return false }
+                let floatValue = Float(value)
+                guard floatValue.isFinite, Double(floatValue) == value else {
+                    return false
+                }
             }
+            return true
         }
-        return true
+    }
+
+    static func isExactFloat32(_ values: ContiguousArray<Double>) -> Bool {
+        values.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return true }
+            for i in 0..<buf.count {
+                let value = base[i]
+                guard value.isFinite else { return false }
+                let floatValue = Float(value)
+                guard floatValue.isFinite, Double(floatValue) == value else {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    static func makeFloat32Array(_ values: [Double]) -> MLXArray {
+        let count = values.count
+        let floats = ContiguousArray<Float>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+            values.withUnsafeBufferPointer { inBuf in
+                guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                vDSP_vdpsp(inBase, 1, outBase, 1, vDSP_Length(count))
+            }
+            initCount = count
+        }
+        return floats.withUnsafeBytes { MLXArray($0, [count], type: Float.self) }
+    }
+
+    static func makeFloat32Array(_ values: ContiguousArray<Double>) -> MLXArray {
+        let count = values.count
+        let floats = ContiguousArray<Float>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+            values.withUnsafeBufferPointer { inBuf in
+                guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                vDSP_vdpsp(inBase, 1, outBase, 1, vDSP_Length(count))
+            }
+            initCount = count
+        }
+        return floats.withUnsafeBytes { MLXArray($0, [count], type: Float.self) }
     }
 
     private static let bundleName = "mlx-swift_Cmlx"
@@ -304,14 +370,43 @@ struct MLXDeviceVector {
     let count: Int
 
     init?(_ values: [Double], minimumCount: Int = MLXBackend.automaticMinimumCount) {
-        guard MLXBackend.shouldUse(elementCount: values.count, minimumCount: minimumCount),
-              values.allSatisfy(\.isFinite)
-        else {
+        guard MLXBackend.shouldUse(elementCount: values.count, minimumCount: minimumCount) else {
             return nil
         }
+        var checkSum = 0.0
+        values.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            vDSP_sveD(base, 1, &checkSum, vDSP_Length(buf.count))
+        }
+        if !checkSum.isFinite {
+            guard values.allSatisfy(\.isFinite) else { return nil }
+        }
         if MLXBackend.shouldUseFloat32GPU(for: values, maxMagnitude: 1e6) {
-            let floats = values.map(Float.init)
-            self.array = floats.withUnsafeBytes { MLXArray($0, [floats.count], type: Float.self) }
+            self.array = MLXBackend.makeFloat32Array(values)
+            self.usesFloat32GPU = true
+        } else {
+            self.array = MLXVector.makeArray(values)
+            self.usesFloat32GPU = false
+        }
+        self.count = values.count
+    }
+
+    init?(_ values: ContiguousArray<Double>, minimumCount: Int = MLXBackend.automaticMinimumCount, assumeFinite: Bool = false) {
+        guard MLXBackend.shouldUse(elementCount: values.count, minimumCount: minimumCount) else {
+            return nil
+        }
+        if !assumeFinite {
+            var checkSum = 0.0
+            values.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                vDSP_sveD(base, 1, &checkSum, vDSP_Length(buf.count))
+            }
+            if !checkSum.isFinite {
+                guard values.allSatisfy(\.isFinite) else { return nil }
+            }
+        }
+        if MLXBackend.shouldUseFloat32GPU(for: values, maxMagnitude: 1e6) {
+            self.array = MLXBackend.makeFloat32Array(values)
             self.usesFloat32GPU = true
         } else {
             self.array = MLXVector.makeArray(values)
@@ -414,6 +509,194 @@ enum NumericEngine {
         var sorted: [Double] = []
     }
 
+    /// Fast O(N) summary statistics (`count`, `mean`, `standardDeviation`, `median`, `min`, `max`)
+    /// operating directly on `NumericBuffer` without full sorting on CPU.
+    static func summaryMoments(of buffer: NumericBuffer) -> ColumnSummary {
+        guard buffer.nonMissingCount > 0 else {
+            return ColumnSummary(
+                count: 0,
+                mean: nil,
+                standardDeviation: nil,
+                median: nil,
+                min: nil,
+                max: nil
+            )
+        }
+        let contiguous: ContiguousArray<Double>
+        if !buffer.hasMissing {
+            contiguous = buffer.floatColumn.values
+        } else {
+            contiguous = ContiguousArray(buffer.numbers)
+        }
+        let n = contiguous.count
+
+        // Use GPU Float32 fused reduction when `.gpu` or `.gpuFloat32` is active and eligible.
+        if (MLXBackend.policy == .gpu || MLXBackend.policy == .gpuFloat32),
+           let vector = MLXDeviceVector(
+               contiguous,
+               minimumCount: MLXBackend.automaticComplexMinimumCount,
+               assumeFinite: true
+           ),
+           vector.usesFloat32GPU
+        {
+            let fused = vector.fusedMoments()
+            return ColumnSummary(
+                count: n,
+                mean: fused.mean,
+                standardDeviation: fused.standardDeviation,
+                median: median(sorted: fused.sorted),
+                min: fused.sorted.first,
+                max: fused.sorted.last
+            )
+        }
+
+        var minVal = Double.infinity
+        var maxVal = -Double.infinity
+        var meanVal = 0.0
+        var stdVal: Double?
+
+        contiguous.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            let len = vDSP_Length(n)
+            vDSP_minvD(base, 1, &minVal, len)
+            vDSP_maxvD(base, 1, &maxVal, len)
+            vDSP_meanvD(base, 1, &meanVal, len)
+            if n > 1 {
+                var s0 = 0.0
+                var s1 = 0.0
+                var s2 = 0.0
+                var s3 = 0.0
+                let limit = n & ~3
+                var i = 0
+                while i < limit {
+                    let d0 = base[i] - meanVal
+                    let d1 = base[i + 1] - meanVal
+                    let d2 = base[i + 2] - meanVal
+                    let d3 = base[i + 3] - meanVal
+                    s0 += d0 * d0
+                    s1 += d1 * d1
+                    s2 += d2 * d2
+                    s3 += d3 * d3
+                    i += 4
+                }
+                var sqDiff = (s0 + s1) + (s2 + s3)
+                while i < n {
+                    let d = base[i] - meanVal
+                    sqDiff += d * d
+                    i += 1
+                }
+                stdVal = (sqDiff / Double(n - 1)).squareRoot()
+            }
+        }
+
+        let medVal = quickselectMedian(contiguous)
+        return ColumnSummary(
+            count: n,
+            mean: meanVal,
+            standardDeviation: stdVal,
+            median: medVal,
+            min: minVal,
+            max: maxVal
+        )
+    }
+
+    /// Computes the exact median in O(N) time using 3-way Dutch National Flag Quickselect
+    /// with Tukey's ninther pivot selection.
+    static func quickselectMedian(_ values: ContiguousArray<Double>) -> Double {
+        let n = values.count
+        if n == 0 { return 0.0 }
+        if n == 1 { return values[0] }
+        if n == 2 { return (values[0] + values[1]) * 0.5 }
+
+        var work = values
+        return work.withUnsafeMutableBufferPointer { buf -> Double in
+            guard let base = buf.baseAddress else { return 0.0 }
+
+            @inline(__always)
+            func median3(_ a: Double, _ b: Double, _ c: Double) -> Double {
+                if a < b {
+                    return b < c ? b : (a < c ? c : a)
+                } else {
+                    return a < c ? a : (b < c ? c : b)
+                }
+            }
+
+            let k = n / 2
+            var lo = 0
+            var hi = n - 1
+            var matchedEqualRange = false
+            var equalLower = 0
+
+            while lo < hi {
+                let len = hi - lo + 1
+                if len <= 32 {
+                    var i = lo + 1
+                    while i <= hi {
+                        let key = base[i]
+                        var j = i - 1
+                        while j >= lo && base[j] > key {
+                            base[j + 1] = base[j]
+                            j -= 1
+                        }
+                        base[j + 1] = key
+                        i += 1
+                    }
+                    break
+                }
+
+                let step = len / 8
+                let mid = lo + (len >> 1)
+                let m1 = median3(base[lo], base[lo + step], base[lo + step * 2])
+                let m2 = median3(base[mid - step], base[mid], base[mid + step])
+                let m3 = median3(base[hi - step * 2], base[hi - step], base[hi])
+                let pivot = median3(m1, m2, m3)
+
+                var lt = lo
+                var idx = lo
+                var gt = hi
+                while idx <= gt {
+                    let v = base[idx]
+                    if v < pivot {
+                        base[idx] = base[lt]
+                        base[lt] = v
+                        lt += 1
+                        idx += 1
+                    } else if v > pivot {
+                        base[idx] = base[gt]
+                        base[gt] = v
+                        gt -= 1
+                    } else {
+                        idx += 1
+                    }
+                }
+
+                if k < lt {
+                    hi = lt - 1
+                } else if k > gt {
+                    lo = gt + 1
+                } else {
+                    matchedEqualRange = true
+                    equalLower = lt
+                    break
+                }
+            }
+
+            let upperMedian = base[k]
+            if (n & 1) == 1 {
+                return upperMedian
+            }
+            if matchedEqualRange && equalLower < k {
+                return upperMedian
+            }
+            if !matchedEqualRange && (k - 1) >= lo {
+                return (base[k - 1] + upperMedian) * 0.5
+            }
+            var leftMax = -Double.infinity
+            vDSP_maxvD(base, 1, &leftMax, vDSP_Length(k))
+            return (leftMax + upperMedian) * 0.5
+        }
+    }
+
     static func moments(of numbers: [Double]) -> Moments {
         guard !numbers.isEmpty else {
             return Moments(count: 0)
@@ -422,23 +705,33 @@ enum NumericEngine {
         let mean: Double
         let standardDeviation: Double?
 
-        if let vector = MLXDeviceVector(numbers, minimumCount: MLXBackend.automaticComplexMinimumCount) {
+        if (MLXBackend.policy == .gpu || MLXBackend.policy == .gpuFloat32),
+           let vector = MLXDeviceVector(numbers, minimumCount: MLXBackend.automaticComplexMinimumCount),
+           vector.usesFloat32GPU
+        {
             let fused = vector.fusedMoments()
             mean = fused.mean
             standardDeviation = fused.standardDeviation
             sorted = fused.sorted
         } else {
             sorted = numbers.sorted()
-            var sum = 0.0
-            for x in numbers { sum += x }
-            mean = sum / Double(numbers.count)
-            if numbers.count > 1 {
+            var avg = 0.0
+            let n = numbers.count
+            numbers.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                vDSP_meanvD(base, 1, &avg, vDSP_Length(n))
+            }
+            mean = avg
+            if n > 1 {
                 var sqDiff = 0.0
-                for x in numbers {
-                    let d = x - mean
-                    sqDiff += d * d
+                numbers.withUnsafeBufferPointer { buf in
+                    guard let base = buf.baseAddress else { return }
+                    for i in 0..<n {
+                        let d = base[i] - avg
+                        sqDiff += d * d
+                    }
                 }
-                standardDeviation = (sqDiff / Double(numbers.count - 1)).squareRoot()
+                standardDeviation = (sqDiff / Double(n - 1)).squareRoot()
             } else {
                 standardDeviation = nil
             }
@@ -462,6 +755,9 @@ enum NumericEngine {
     static func reduce(_ numbers: [Double], using function: AggregateFunction) -> Double? {
         guard !numbers.isEmpty else {
             return function == .count ? 0 : nil
+        }
+        if function == .median && MLXBackend.policy != .gpu && MLXBackend.policy != .gpuFloat32 {
+            return quickselectMedian(ContiguousArray(numbers))
         }
         let minCount = function == .median
             ? MLXBackend.automaticComplexMinimumCount
@@ -502,7 +798,7 @@ enum NumericEngine {
         case .max:
             return numbers.max()
         case .median:
-            return median(sorted: numbers.sorted())
+            return quickselectMedian(ContiguousArray(numbers))
         case .variance:
             guard numbers.count > 1 else { return nil }
             let mean = numbers.reduce(0, +) / Double(numbers.count)
@@ -520,83 +816,98 @@ enum NumericEngine {
     }
 
     static func median(sorted: [Double]) -> Double {
-        let count = sorted.count
-        if count.isMultiple(of: 2) {
-            return sorted[(count - 1) / 2] / 2 + sorted[count / 2] / 2
-        }
-        return sorted[count / 2]
+        let mid = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[mid - 1] + sorted[mid]) / 2.0
+            : sorted[mid]
     }
 
-    /// Linear-interpolation quantile of ascending values (pandas default).
     static func quantile(sorted: [Double], probability: Double) -> Double {
-        guard sorted.count > 1 else { return sorted.first ?? .nan }
-        let clamped = Swift.min(Swift.max(probability, 0), 1)
-        let position = clamped * Double(sorted.count - 1)
-        let lowerIndex = Int(position)
-        let upperIndex = Swift.min(lowerIndex + 1, sorted.count - 1)
-        let fraction = position - Double(lowerIndex)
-        return sorted[lowerIndex] * (1 - fraction) + sorted[upperIndex] * fraction
+        let p = Swift.min(Swift.max(probability, 0), 1)
+        let position = p * Double(sorted.count - 1)
+        let lower = Int(floor(position))
+        let upper = Int(ceil(position))
+        guard lower != upper else { return sorted[lower] }
+        let weight = position - Double(lower)
+        return sorted[lower] * (1 - weight) + sorted[upper] * weight
     }
 
     // MARK: Grouped reductions
 
-    /// Reduces one numeric column for every group in a single pass.
-    ///
-    /// - Parameters:
-    ///   - values: one entry per grouped row; `nil` marks a missing value.
-    ///   - groupIDs: group index (`0..<groupCount`) of each entry.
-    /// - Returns: one result per group; `nil` when a group has no numeric value.
-    static func groupedReduction(
+    /// Vectorized grouped reduction for `count`, `sum`, `mean`, `min`, `max`,
+    /// `variance`, and `standardDeviation` over preassigned group indices
+    /// `0..<groupCount` (or `-1` for rows with missing keys).
+    static func reduceGroups(
         values: [Double?],
-        groupIDs: [Int],
+        groupIds: [Int],
         groupCount: Int,
-        function: AggregateFunction
+        using function: AggregateFunction
     ) -> [Double?]? {
         Device.withDefaultDevice(.cpu) {
-            scatterReduction(
-                values: values, groupIDs: groupIDs, groupCount: groupCount, function: function)
+            reduceGroupsOnCPU(
+                values: values, groupIds: groupIds, groupCount: groupCount, using: function)
         }
     }
 
-    private static func scatterReduction(
+    private static func reduceGroupsOnCPU(
         values: [Double?],
-        groupIDs: [Int],
+        groupIds: [Int],
         groupCount: Int,
-        function: AggregateFunction
+        using function: AggregateFunction
     ) -> [Double?]? {
-        guard MLXBackend.shouldUse(elementCount: values.count),
-              groupCount > 0,
-              [.sum, .mean, .min, .max, .variance, .standardDeviation].contains(function)
+        guard groupCount > 0,
+              values.count == groupIds.count,
+              MLXBackend.shouldUse(elementCount: values.count)
         else {
             return nil
         }
-        let valid = values.map { $0 != nil }
-        let numbers = values.map { $0 ?? 0 }
-        let ids = groupIDs.map(Int32.init)
 
-        let counts: [Double]
-        var result: [Double] = []
-        let sums: [Double]
         switch function {
-        case .min, .max:
-            let sentinel = function == .min ? Double.infinity : -Double.infinity
-            let masked = zip(numbers, valid).map { $1 ? $0 : sentinel }
-            let output = MLX.full(
-                [groupCount], values: MLXArray(float64: sentinel), type: Double.self,
-                stream: .cpu)
-            let indices = MLXArray(ids)
-            let source = MLXVector.makeArray(masked)
-            let reduced = function == .min
-                ? output.at[indices, stream: .cpu].minimum(source)
-                : output.at[indices, stream: .cpu].maximum(source)
-            result = reduced.asArray(Double.self)
-            counts = Self.scatterSum(
-                valid.map { $0 ? 1.0 : 0.0 }, ids: ids, groupCount: groupCount)
-            sums = []
+        case .count, .sum, .mean, .min, .max, .variance, .standardDeviation:
+            break
+        case .median, .first, .last:
+            return nil
+        }
+
+        var valid = [Bool]()
+        valid.reserveCapacity(values.count)
+        var numbers = [Double]()
+        numbers.reserveCapacity(values.count)
+        var ids = [Int32]()
+        ids.reserveCapacity(values.count)
+
+        for (value, group) in zip(values, groupIds) {
+            if let number = value, number.isFinite, group >= 0 {
+                valid.append(true)
+                numbers.append(number)
+                ids.append(Int32(group))
+            } else {
+                valid.append(false)
+                numbers.append(0)
+                ids.append(0)
+            }
+        }
+
+        let ones = valid.map { $0 ? 1.0 : 0.0 }
+        let counts = Self.scatterSum(ones, ids: ids, groupCount: groupCount)
+        if function == .count {
+            return counts.map( Optional.some )
+        }
+
+        var result: [Double]
+        switch function {
+        case .min:
+            let fill = numbers.enumerated().map { valid[$0.offset] ? $0.element : Double.infinity }
+            let initial = MLXArray(Array(repeating: Double.infinity, count: groupCount), [groupCount])
+            let updated = initial.at[MLXArray(ids), stream: .cpu].minimum(MLXVector.makeArray(fill))
+            result = updated.asArray(Double.self)
+        case .max:
+            let fill = numbers.enumerated().map { valid[$0.offset] ? $0.element : -Double.infinity }
+            let initial = MLXArray(Array(repeating: -Double.infinity, count: groupCount), [groupCount])
+            let updated = initial.at[MLXArray(ids), stream: .cpu].maximum(MLXVector.makeArray(fill))
+            result = updated.asArray(Double.self)
         default:
-            sums = Self.scatterSum(numbers, ids: ids, groupCount: groupCount)
-            counts = Self.scatterSum(
-                valid.map { $0 ? 1.0 : 0.0 }, ids: ids, groupCount: groupCount)
+            let sums = Self.scatterSum(numbers, ids: ids, groupCount: groupCount)
             switch function {
             case .sum:
                 result = sums
@@ -633,21 +944,6 @@ enum NumericEngine {
 
     // MARK: Window reductions
 
-    /// Prefix sums and prefix valid-counts for rolling/expanding sum, mean,
-    /// and count. Missing values contribute zero to the sum and one to
-    /// nothing, so windows containing missing values need no native fallback.
-    static func prefixSums(values: [Double?]) -> (sums: [Double], counts: [Int])? {
-        guard MLXBackend.shouldUse(elementCount: values.count) else { return nil }
-        let numbers = values.map { $0 ?? 0 }
-        let valid = values.map { $0 == nil ? 0.0 : 1.0 }
-        let sumsArr = MLX.cumsum(MLXVector.makeArray(numbers), stream: .cpu)
-        let countsArr = MLX.cumsum(MLXVector.makeArray(valid), stream: .cpu)
-        MLX.eval([sumsArr, countsArr])
-        let sums = sumsArr.asArray(Double.self)
-        let counts = countsArr.asArray(Double.self)
-        return (sums, counts.map { Int($0) })
-    }
-
     /// Vectorized 2D strided window reduction for non-null contiguous `Double` columns.
     static func rollingWindowNoNulls(
         _ column: Float64Column,
@@ -656,12 +952,14 @@ enum NumericEngine {
         using function: AggregateFunction
     ) -> Float64Column? {
         let count = column.count
+        // Note: `.sum`, `.mean`, and `.count` are O(N) via sliding-window accumulators in `DataFrame.rolling`,
+        // which does Wx less work than 2D strided reductions (`O(N * W)`).
         guard !column.hasNulls,
               window >= 1,
               window <= count,
               minPeriods == window,
               MLXBackend.shouldUse(elementCount: count, minimumCount: MLXBackend.automaticComplexMinimumCount),
-              [.sum, .mean, .min, .max, .variance, .standardDeviation].contains(function)
+              [.min, .max, .variance, .standardDeviation].contains(function)
         else {
             return nil
         }
@@ -672,10 +970,6 @@ enum NumericEngine {
             let strided = MLX.asStrided(arr, [numWindows, window], strides: [1, 1], offset: 0, stream: .cpu)
             let reduced: MLXArray
             switch function {
-            case .sum:
-                reduced = MLX.sum(strided, axis: 1, stream: .cpu)
-            case .mean:
-                reduced = MLX.mean(strided, axis: 1, stream: .cpu)
             case .min:
                 reduced = MLX.min(strided, axis: 1, stream: .cpu)
             case .max:
@@ -722,8 +1016,31 @@ enum NumericEngine {
         name: String,
         using function: CumulativeFunction
     ) -> Float64Column? {
+        guard MLXBackend.shouldUse(elementCount: buffer.nonMissingCount) else { return nil }
+        if !buffer.hasMissing && function == .sum && MLXBackend.policy != .gpu && MLXBackend.policy != .gpuFloat32 {
+            let count = buffer.count
+            var anyNonFinite = false
+            let outVals = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+                buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                    guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                    var acc = 0.0
+                    for i in 0..<count {
+                        acc += inBase[i]
+                        outBase[i] = acc
+                    }
+                    if !acc.isFinite {
+                        anyNonFinite = true
+                    }
+                }
+                initCount = count
+            }
+            if !anyNonFinite {
+                return Float64Column(name: name, values: outVals, nullBitmap: BitSet(count: count))
+            }
+            return nil
+        }
+
         let nonMissing = buffer.numbers
-        guard MLXBackend.shouldUse(elementCount: nonMissing.count) else { return nil }
         let array = MLXVector.makeArray(nonMissing)
         let reduced: MLXArray
         switch function {
@@ -806,9 +1123,15 @@ enum NumericEngine {
 
     static func absColumn(_ buffer: NumericBuffer, name: String) -> Float64Column? {
         guard MLXBackend.shouldUse(elementCount: buffer.count) else { return nil }
-        let array = MLXVector.makeArray(buffer.floatColumn.values)
-        let result = ContiguousArray(MLX.abs(array, stream: .cpu).asArray(Double.self))
-        return NumericBuffer.makeColumn(name: name, values: result, nullBitmap: buffer.floatColumn.nullBitmap)
+        let count = buffer.count
+        let outVals = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+            buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                vDSP_vabsD(inBase, 1, outBase, 1, vDSP_Length(count))
+            }
+            initCount = count
+        }
+        return Float64Column(name: name, values: outVals, nullBitmap: buffer.floatColumn.nullBitmap)
     }
 
     static func differenceColumn(
@@ -909,39 +1232,121 @@ enum NumericEngine {
         return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
     }
 
+    /// Single-pass element-wise kernel: writes `body(left, right)` and reports
+    /// whether every result is finite (`v - v` is zero only for finite `v`),
+    /// so no separate validation pass over the output is needed.
+    @inline(__always)
+    private static func simdBinary(
+        _ left: UnsafePointer<Double>,
+        _ right: UnsafePointer<Double>,
+        _ out: UnsafeMutablePointer<Double>,
+        _ count: Int,
+        _ body: (SIMD4<Double>, SIMD4<Double>) -> SIMD4<Double>
+    ) -> Bool {
+        var accumulator = SIMD4<Double>(repeating: 0)
+        var index = 0
+        while index + 4 <= count {
+            let l = UnsafeRawPointer(left + index).loadUnaligned(as: SIMD4<Double>.self)
+            let r = UnsafeRawPointer(right + index).loadUnaligned(as: SIMD4<Double>.self)
+            let v = body(l, r)
+            UnsafeMutableRawPointer(out + index).storeBytes(of: v, as: SIMD4<Double>.self)
+            accumulator += v - v
+            index += 4
+        }
+        var tail = 0.0
+        while index < count {
+            let v = body(SIMD4(repeating: left[index]), SIMD4(repeating: right[index]))[0]
+            out[index] = v
+            tail += v - v
+            index += 1
+        }
+        return accumulator.sum() + tail == 0
+    }
+
+    /// Single-pass `sqrt` with the same finite-result reporting as ``simdBinary``.
+    @inline(__always)
+    private static func simdSquareRoot(
+        _ input: UnsafePointer<Double>,
+        _ out: UnsafeMutablePointer<Double>,
+        _ count: Int
+    ) -> Bool {
+        var accumulator = SIMD4<Double>(repeating: 0)
+        var index = 0
+        while index + 4 <= count {
+            let x = UnsafeRawPointer(input + index).loadUnaligned(as: SIMD4<Double>.self)
+            let v = x.squareRoot()
+            UnsafeMutableRawPointer(out + index).storeBytes(of: v, as: SIMD4<Double>.self)
+            accumulator += v - v
+            index += 4
+        }
+        var tail = 0.0
+        while index < count {
+            let v = input[index].squareRoot()
+            out[index] = v
+            tail += v - v
+            index += 1
+        }
+        return accumulator.sum() + tail == 0
+    }
+
     static func binaryArithmeticColumn(
         left: NumericBuffer,
         right: NumericBuffer,
         name: String,
         operation: ArithmeticOperator
     ) -> Float64Column? {
-        guard left.count == right.count,
-              MLXBackend.shouldUse(elementCount: left.count)
+        let count = left.count
+        guard count == right.count,
+              MLXBackend.shouldUse(elementCount: count)
         else {
             return nil
         }
-        let lhs = MLXVector.makeArray(left.floatColumn.values)
-        let rhs = MLXVector.makeArray(right.floatColumn.values)
-        let computed: MLXArray
-        switch operation {
-        case .add:
-            computed = MLX.add(lhs, rhs, stream: .cpu)
-        case .subtract:
-            computed = MLX.subtract(lhs, rhs, stream: .cpu)
-        case .multiply:
-            computed = MLX.multiply(lhs, rhs, stream: .cpu)
-        case .divide:
-            computed = MLX.divide(lhs, rhs, stream: .cpu)
+        return nativeBinaryArithmeticColumn(left: left, right: right, name: name, operation: operation)
+    }
+
+    /// Accelerate/SIMD element-wise arithmetic that does not depend on the MLX policy.
+    static func nativeBinaryArithmeticColumn(
+        left: NumericBuffer,
+        right: NumericBuffer,
+        name: String,
+        operation: ArithmeticOperator
+    ) -> Float64Column {
+        let count = left.count
+        var allFinite = false
+        let raw = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+            left.floatColumn.values.withUnsafeBufferPointer { lBuf in
+                right.floatColumn.values.withUnsafeBufferPointer { rBuf in
+                    guard let lBase = lBuf.baseAddress,
+                          let rBase = rBuf.baseAddress,
+                          let outBase = outBuf.baseAddress else { return }
+                    switch operation {
+                    case .add:
+                        allFinite = simdBinary(lBase, rBase, outBase, count, +)
+                    case .subtract:
+                        allFinite = simdBinary(lBase, rBase, outBase, count, -)
+                    case .multiply:
+                        allFinite = simdBinary(lBase, rBase, outBase, count, *)
+                    case .divide:
+                        allFinite = simdBinary(lBase, rBase, outBase, count, /)
+                    }
+                }
+            }
+            initCount = count
         }
-        let raw = ContiguousArray(computed.asArray(Double.self))
-        var combinedNulls = left.floatColumn.nullBitmap.bitwiseOr(right.floatColumn.nullBitmap)
+
+        let combinedNulls = left.floatColumn.nullBitmap.bitwiseOr(right.floatColumn.nullBitmap)
+        if !combinedNulls.mayHaveTrueBits && allFinite {
+            return Float64Column(name: name, values: raw, nullBitmap: combinedNulls)
+        }
+
+        var updatedNulls = combinedNulls
         if operation == .divide {
             let rVals = right.floatColumn.values
             for i in 0..<rVals.count where rVals[i] == 0 {
-                combinedNulls[i] = true
+                updatedNulls[i] = true
             }
         }
-        return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: combinedNulls)
+        return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: updatedNulls)
     }
 
     static func scalarArithmeticColumn(
@@ -950,33 +1355,47 @@ enum NumericEngine {
         scalar: Double,
         operation: ArithmeticOperator
     ) -> Float64Column? {
+        let count = buffer.count
         guard scalar.isFinite,
-              MLXBackend.shouldUse(elementCount: buffer.count)
+              MLXBackend.shouldUse(elementCount: count)
         else {
             return nil
         }
         if operation == .divide && scalar == 0 {
             return Float64Column(
                 name: name,
-                values: ContiguousArray(repeating: 0.0, count: buffer.count),
-                nullBitmap: BitSet(count: buffer.count, repeating: true)
+                values: ContiguousArray(repeating: 0.0, count: count),
+                nullBitmap: BitSet(count: count, repeating: true)
             )
         }
-        let lhs = MLXVector.makeArray(buffer.floatColumn.values)
-        let rhs = MLXArray(float64: scalar)
-        let computed: MLXArray
-        switch operation {
-        case .add:
-            computed = MLX.add(lhs, rhs, stream: .cpu)
-        case .subtract:
-            computed = MLX.subtract(lhs, rhs, stream: .cpu)
-        case .multiply:
-            computed = MLX.multiply(lhs, rhs, stream: .cpu)
-        case .divide:
-            computed = MLX.divide(lhs, rhs, stream: .cpu)
+
+        var checkSum = Double.nan
+        let raw = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+            buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                let len = vDSP_Length(count)
+                var s = scalar
+                switch operation {
+                case .add:
+                    vDSP_vsaddD(inBase, 1, &s, outBase, 1, len)
+                case .subtract:
+                    var negS = -scalar
+                    vDSP_vsaddD(inBase, 1, &negS, outBase, 1, len)
+                case .multiply:
+                    vDSP_vsmulD(inBase, 1, &s, outBase, 1, len)
+                case .divide:
+                    vDSP_vsdivD(inBase, 1, &s, outBase, 1, len)
+                }
+                vDSP_sveD(outBase, 1, &checkSum, len)
+            }
+            initCount = count
         }
-        let raw = ContiguousArray(computed.asArray(Double.self))
-        return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: buffer.floatColumn.nullBitmap)
+
+        let nulls = buffer.floatColumn.nullBitmap
+        if !nulls.mayHaveTrueBits && checkSum.isFinite {
+            return Float64Column(name: name, values: raw, nullBitmap: nulls)
+        }
+        return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
     }
 
     static func unaryMathColumn(
@@ -984,31 +1403,118 @@ enum NumericEngine {
         name: String,
         function: UnaryMathFunction
     ) -> Float64Column? {
-        guard MLXBackend.shouldUse(elementCount: buffer.count) else { return nil }
-        let array = MLXVector.makeArray(buffer.floatColumn.values)
-        let computed: MLXArray
-        switch function {
-        case .sqrt:
-            computed = MLX.sqrt(array, stream: .cpu)
-        case .exp:
-            computed = MLX.exp(array, stream: .cpu)
-        case .log:
-            computed = MLX.log(array, stream: .cpu)
-        case .log10:
-            computed = MLX.log10(array, stream: .cpu)
-        case .log1p:
-            computed = MLX.log1p(array, stream: .cpu)
-        case .sin:
-            computed = MLX.sin(array, stream: .cpu)
-        case .cos:
-            computed = MLX.cos(array, stream: .cpu)
-        case .tan:
-            computed = MLX.tan(array, stream: .cpu)
-        case .sign:
-            computed = MLX.sign(array, stream: .cpu)
+        let count = buffer.count
+        guard MLXBackend.shouldUse(elementCount: count) else { return nil }
+
+        // `sqrt` and `sign` are memory-bound: Double/Float conversion costs more than the GPU saves.
+        if (MLXBackend.policy == .gpu || MLXBackend.policy == .gpuFloat32),
+           function != .sqrt, function != .sign,
+           MLXBackend.shouldUseFloat32GPU(for: buffer.floatColumn.values, maxMagnitude: 1e6)
+        {
+            let array = MLXBackend.makeFloat32Array(buffer.floatColumn.values)
+            let computed: MLXArray
+            switch function {
+            case .sqrt:
+                computed = MLX.sqrt(array, stream: .gpu)
+            case .exp:
+                computed = MLX.exp(array, stream: .gpu)
+            case .log:
+                computed = MLX.log(array, stream: .gpu)
+            case .log10:
+                computed = MLX.log10(array, stream: .gpu)
+            case .log1p:
+                computed = MLX.log1p(array, stream: .gpu)
+            case .sin:
+                computed = MLX.sin(array, stream: .gpu)
+            case .cos:
+                computed = MLX.cos(array, stream: .gpu)
+            case .tan:
+                computed = MLX.tan(array, stream: .gpu)
+            case .sign:
+                computed = MLX.sign(array, stream: .gpu)
+            }
+            let floats = computed.asArray(Float.self)
+            var checkSum = Double.nan
+            let raw = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+                floats.withUnsafeBufferPointer { inBuf in
+                    guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                    let len = vDSP_Length(count)
+                    vDSP_vspdp(inBase, 1, outBase, 1, len)
+                    vDSP_sveD(outBase, 1, &checkSum, len)
+                }
+                initCount = count
+            }
+            let nulls = buffer.floatColumn.nullBitmap
+            if !nulls.mayHaveTrueBits && checkSum.isFinite {
+                return Float64Column(name: name, values: raw, nullBitmap: nulls)
+            }
+            return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
         }
-        let raw = ContiguousArray(computed.asArray(Double.self))
-        return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: buffer.floatColumn.nullBitmap)
+
+        return nativeUnaryMathColumn(buffer: buffer, name: name, function: function)
+    }
+
+    /// Accelerate/SIMD unary math that does not depend on the MLX policy.
+    static func nativeUnaryMathColumn(
+        buffer: NumericBuffer,
+        name: String,
+        function: UnaryMathFunction
+    ) -> Float64Column {
+        let count = buffer.count
+        if function == .sqrt {
+            var allFinite = false
+            let raw = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+                buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                    guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                    allFinite = simdSquareRoot(inBase, outBase, count)
+                }
+                initCount = count
+            }
+            let nulls = buffer.floatColumn.nullBitmap
+            if !nulls.mayHaveTrueBits && allFinite {
+                return Float64Column(name: name, values: raw, nullBitmap: nulls)
+            }
+            return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
+        }
+
+        var checkSum = Double.nan
+        let raw = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { outBuf, initCount in
+            buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                var n32 = Int32(count)
+                switch function {
+                case .sqrt:
+                    vvsqrt(outBase, inBase, &n32)
+                case .exp:
+                    vvexp(outBase, inBase, &n32)
+                case .log:
+                    vvlog(outBase, inBase, &n32)
+                case .log10:
+                    vvlog10(outBase, inBase, &n32)
+                case .log1p:
+                    vvlog1p(outBase, inBase, &n32)
+                case .sin:
+                    vvsin(outBase, inBase, &n32)
+                case .cos:
+                    vvcos(outBase, inBase, &n32)
+                case .tan:
+                    vvtan(outBase, inBase, &n32)
+                case .sign:
+                    for i in 0..<count {
+                        let x = inBase[i]
+                        outBase[i] = x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0)
+                    }
+                }
+                vDSP_sveD(outBase, 1, &checkSum, vDSP_Length(count))
+            }
+            initCount = count
+        }
+
+        let nulls = buffer.floatColumn.nullBitmap
+        if !nulls.mayHaveTrueBits && checkSum.isFinite {
+            return Float64Column(name: name, values: raw, nullBitmap: nulls)
+        }
+        return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
     }
 
     static func powerColumn(
@@ -1106,48 +1612,73 @@ enum NumericEngine {
         // Fast matrix path when no column has missing values and rowCount >= 2.
         if rowCount >= 2, buffers.allSatisfy({ !$0.hasMissing }) {
             let canUseGPU = buffers.allSatisfy {
-                MLXBackend.shouldUseFloat32GPU(for: $0.floatColumn.values, maxMagnitude: 1e4)
+                MLXBackend.shouldUseFloat32GPU(for: $0.floatColumn.values, maxMagnitude: 1e6)
             }
 
-            let covArray: [Double]
+            var covMatrix = [Double](repeating: 0.0, count: columnCount * columnCount)
+
             if canUseGPU {
-                var rowMajorFloats = [Float]()
-                rowMajorFloats.reserveCapacity(rowCount * columnCount)
-                for row in 0..<rowCount {
+                // Pack [columnCount, rowCount] contiguously without CPU transposition using vDSP_vdpsp.
+                let totalCount = columnCount * rowCount
+                let colMajorFloats = ContiguousArray<Float>(unsafeUninitializedCapacity: totalCount) { outBuf, initCount in
+                    guard let outBase = outBuf.baseAddress else { return }
+                    let len = vDSP_Length(rowCount)
                     for col in 0..<columnCount {
-                        rowMajorFloats.append(Float(buffers[col].floatColumn.values[row]))
+                        buffers[col].floatColumn.values.withUnsafeBufferPointer { inBuf in
+                            guard let inBase = inBuf.baseAddress else { return }
+                            vDSP_vdpsp(inBase, 1, outBase.advanced(by: col * rowCount), 1, len)
+                        }
                     }
+                    initCount = totalCount
                 }
-                let matrix = rowMajorFloats.withUnsafeBytes {
-                    MLXArray($0, [rowCount, columnCount], type: Float.self)
+                let matrix = colMajorFloats.withUnsafeBytes {
+                    MLXArray($0, [columnCount, rowCount], type: Float.self)
                 }
-                let means = MLX.mean(matrix, axis: 0, keepDims: true, stream: .gpu)
+                let means = MLX.mean(matrix, axis: 1, keepDims: true, stream: .gpu)
                 let centered = MLX.subtract(matrix, means, stream: .gpu)
                 let transposed = MLX.transposed(centered, axes: [1, 0], stream: .gpu)
-                let cross = MLX.matmul(transposed, centered, stream: .gpu)
-                covArray = MLX.divide(
+                let cross = MLX.matmul(centered, transposed, stream: .gpu)
+                covMatrix = MLX.divide(
                     cross,
                     MLXArray(Float(rowCount - 1)),
                     stream: .gpu
                 ).asArray(Float.self).map(Double.init)
             } else {
-                var rowMajor = [Double]()
-                rowMajor.reserveCapacity(rowCount * columnCount)
-                for row in 0..<rowCount {
-                    for col in 0..<columnCount {
-                        rowMajor.append(buffers[col].floatColumn.values[row])
+                // Hardware-accelerated vDSP centering + upper-triangular dot products in Double precision.
+                let len = vDSP_Length(rowCount)
+                let invDenom = 1.0 / Double(rowCount - 1)
+                var centeredColumns: [ContiguousArray<Double>] = []
+                centeredColumns.reserveCapacity(columnCount)
+
+                for col in 0..<columnCount {
+                    let centered = ContiguousArray<Double>(unsafeUninitializedCapacity: rowCount) { outBuf, initCount in
+                        buffers[col].floatColumn.values.withUnsafeBufferPointer { inBuf in
+                            guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                            var mean = 0.0
+                            vDSP_meanvD(inBase, 1, &mean, len)
+                            var negMean = -mean
+                            vDSP_vsaddD(inBase, 1, &negMean, outBase, 1, len)
+                        }
+                        initCount = rowCount
+                    }
+                    centeredColumns.append(centered)
+                }
+
+                for i in 0..<columnCount {
+                    centeredColumns[i].withUnsafeBufferPointer { iBuf in
+                        guard let iBase = iBuf.baseAddress else { return }
+                        for j in i..<columnCount {
+                            centeredColumns[j].withUnsafeBufferPointer { jBuf in
+                                guard let jBase = jBuf.baseAddress else { return }
+                                var dot = 0.0
+                                vDSP_dotprD(iBase, 1, jBase, 1, &dot, len)
+                                let cov = dot * invDenom
+                                covMatrix[i * columnCount + j] = cov
+                                covMatrix[j * columnCount + i] = cov
+                            }
+                        }
                     }
                 }
-                let matrix = MLXVector.makeMatrix(rowMajor, rows: rowCount, columns: columnCount)
-                let means = MLX.mean(matrix, axis: 0, keepDims: true, stream: .cpu)
-                let centered = MLX.subtract(matrix, means, stream: .cpu)
-                let transposed = MLX.transposed(centered, axes: [1, 0], stream: .cpu)
-                let cross = MLX.matmul(transposed, centered, stream: .cpu)
-                covArray = MLX.divide(
-                    cross,
-                    MLXArray(float64: Double(rowCount - 1)),
-                    stream: .cpu
-                ).asArray(Double.self)
             }
 
             var result = Array(
@@ -1157,14 +1688,14 @@ enum NumericEngine {
             if !correlation {
                 for i in 0..<columnCount {
                     for j in 0..<columnCount {
-                        let v = covArray[i * columnCount + j]
+                        let v = covMatrix[i * columnCount + j]
                         result[i][j] = v.isFinite ? v : nil
                     }
                 }
                 return result
             } else {
                 let diagStds = (0..<columnCount).map { i -> Double in
-                    let variance = covArray[i * columnCount + i]
+                    let variance = covMatrix[i * columnCount + i]
                     return variance > 0 ? variance.squareRoot() : 0
                 }
                 for i in 0..<columnCount {
@@ -1177,7 +1708,7 @@ enum NumericEngine {
                         if i == j {
                             result[i][j] = 1.0
                         } else {
-                            let corr = covArray[i * columnCount + j] / denom
+                            let corr = covMatrix[i * columnCount + j] / denom
                             result[i][j] = corr.isFinite ? Swift.min(Swift.max(corr, -1.0), 1.0) : nil
                         }
                     }
@@ -1252,6 +1783,33 @@ extension DataFrame {
                     isMissing: item.vector.isMissing
                 )
             }
+        )
+    }
+}
+
+extension Series {
+    /// Extracts a numeric series as an ``MLXVector`` (preserving missing-value
+    /// positions).
+    ///
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series contains
+    ///   non-numeric values.
+    public func toMLXVector() throws -> MLXVector {
+        guard let buffer = numericBuffer else {
+            throw DataFrameError.nonNumericColumn(name)
+        }
+        return MLXVector(values: buffer.values, isMissing: buffer.isMissing)
+    }
+
+    /// Creates a `Series` from an ``MLXVector``.
+    public init(name: String, mlxVector: MLXVector) {
+        let col = NumericBuffer.makeColumn(
+            name: name,
+            numbers: mlxVector.values,
+            isMissing: mlxVector.isMissing
+        )
+        self.init(
+            storage: col,
+            numericBuffer: NumericBuffer(floatColumn: col)
         )
     }
 }

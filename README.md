@@ -168,6 +168,11 @@ Set `BANDAL_DISABLE_MLX=1` in the environment to force the native Swift implemen
   ```sh
   xcrun swift run -c release BandalBenchmarks 1000 10000 100000
   ```
+- **pandas vs Bandal comparison**: sets up a `uv` environment (pandas, numpy), builds the release benchmark, and prints a table of computation-only times (data setup, compilation, warm-up and MLX kernel compilation are excluded) for pandas, native Swift, MLX CPU and MLX GPU. Checksums verify that every engine computes the same result.
+  ```sh
+  Scripts/benchmark.sh [--rows 100000,1000000,5000000] [--repeat 5] [--warmup 2]
+  ```
+  MLX pays off for reductions and moments (`stats_summary`), rolling windows and correlation matrices; row-oriented operations such as `groupby_sum` and `left_join` do not use MLX.
 
 ---
 

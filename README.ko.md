@@ -168,6 +168,11 @@ let restored = try DataFrame(mlxColumns: [(name: "revenue", vector: vector)])
   ```sh
   xcrun swift run -c release BandalBenchmarks 1000 10000 100000
   ```
+- **pandas와 Bandal 성능 비교**: `uv` 환경(pandas, numpy)을 구성하고 릴리스 벤치마크를 빌드한 뒤, pandas·네이티브 Swift·MLX CPU·MLX GPU의 순수 계산 시간(데이터 준비, 컴파일, 워밍업, MLX 커널 컴파일 제외)을 표로 출력합니다. 체크섬으로 모든 엔진이 동일한 결과를 계산했는지 검증합니다.
+  ```sh
+  Scripts/benchmark.sh [--rows 100000,1000000,5000000] [--repeat 5] [--warmup 2]
+  ```
+  MLX는 집계·적률 계산(`stats_summary`), 롤링 윈도우, 상관 행렬에서 효과가 있으며, `groupby_sum`, `left_join` 같은 행 중심 연산은 MLX를 사용하지 않습니다.
 
 ---
 

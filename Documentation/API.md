@@ -799,7 +799,7 @@ print(t)
 
 ### Row-Count Rolling Window (`rolling(_:window:minPeriods:using:)`)
 
-Applies any `AggregateFunction` over a trailing window of `window` rows. By default (`minPeriods == nil`), positions before the first full window (`0 ..< window - 1`) produce `.missing`; set `minPeriods` (`1...window`) to emit results for partial leading windows. Large `.sum`, `.mean`, and `.count` windows use MLX prefix sums, and non-null `.min`, `.max`, `.variance`, and `.standardDeviation` windows use 2D `MLX.asStrided` reductions.
+Applies any `AggregateFunction` over a trailing window of `window` rows. By default (`minPeriods == nil`), positions before the first full window (`0 ..< window - 1`) produce `.missing`; set `minPeriods` (`1...window`) to emit results for partial leading windows. `.sum`, `.mean`, and `.count` windows use a native single-pass O(n) sliding accumulator (sequential scans are memory-bound, so MLX is not used), and non-null `.min`, `.max`, `.variance`, and `.standardDeviation` windows use 2D `MLX.asStrided` reductions.
 
 ```swift
 let rolled = try df.rolling("temp", window: 3, minPeriods: 1, using: .mean)
@@ -873,7 +873,7 @@ Bandal's `NumericEngine` uses MLX Swift across:
 - Fused single-eval descriptive moments (`summary`, `statistics`, `describe`, `describeStructured`)
 - Single-column and whole-frame reductions (`sum`, `mean`, `min`, `max`, `count`, `variance`, `standardDeviation`)
 - Grouped reductions (`groupBy.aggregate`, `groupBy.transform`, `pivotTable`)
-- Prefix-sum and 2D strided (`MLX.asStrided`) rolling and expanding windows
+- 2D strided (`MLX.asStrided`) rolling windows for `min`, `max`, `variance`, and `standardDeviation` (sequential `sum`/`mean`/`count` scans stay native)
 - Zero-boxing `Float64Column` ↔ `MLXArray` unary, binary, power, and math functions (`combining`, `scaling`, `Series` `+`, `-`, `*`, `/`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`, `cumulative`, `applying(_: UnaryMathFunction)`, `power`)
 - Pairwise `covariance()` and `correlation()` matrices via `MLX.matmul`
 

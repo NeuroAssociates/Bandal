@@ -11,3 +11,7 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# Benchmark artifacts
+.benchmark-venv/
+.benchmark-results/

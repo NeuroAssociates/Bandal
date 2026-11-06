@@ -511,3 +511,120 @@ Goal: Eliminate all remaining `[DataValue]` boxing bottlenecks between `Columnar
 - [x] Add comprehensive unit tests covering Phase 7 APIs and MLX CPU/GPU parity in `ExtendedAPITests.swift` and `MLXBackendTests.swift` (66/66 passing).
 - [x] Update `CheckPoints.md` and `ToDo.md` with Phase 7 completion details.
 - [x] Synchronize English and Korean documentation (`Documentation/API.md`, `Documentation/API.ko.md`, `README.md`, `README.ko.md`).
+
+---
+
+# Phase 8 — Large-Scale Benchmark Optimization (100k / 1M / 5M Rows vs Pandas)
+
+Goal: Eliminate remaining `DataValue` boxing in grouping/joining/correlation, replace $O(N \log N)$ and $O(N \times W)$ kernels with $O(N)$ algorithms, and optimize memory bandwidth across all 9 benchmark workloads in `Scripts/benchmark.sh` (`filter`, `arithmetic_sqrt`, `stats_summary`, `rolling_mean_20`, `expanding_sum`, `groupby_sum`, `sort`, `left_join`, `correlation`) at 100k, 1M, and 5M rows.
+
+### 8.1 Baseline Diagnosis (5,000,000 Rows, `Scripts/benchmark.sh`)
+
+| Workload | Pandas (ms) | Bandal Best (ms) | Speedup vs Pandas | Root Cause of Bottleneck |
+| :--- | ---: | ---: | ---: | :--- |
+| `groupby_sum` | 82.50 | 1,130.50 | 0.07x | `CategoricalColumn` key unboxed to `DataValue` and hashed in `[DataValue: Int]` 5M times; `Float64Column` aggregation bypasses MLX and checks nulls row-by-row. |
+| `left_join` | 217.42 | 1,066.74 | 0.20x | `values(in:)` unboxes 5M keys to `[DataValue]`; 1:1 left join re-allocates and copies all 5 left columns via `[Int?]`. |
+| `correlation` | 114.23 | 148.18 (MLX) / 2,778.93 (Swift) | 0.77x / 0.04x | Native unboxes `[DataValue]` and computes all $4 \times 4 = 16$ pairs (including diagonal and lower triangle); MLX manually transposes $5\text{M} \times 4$ array on CPU and falls back from GPU due to `maxMagnitude: 1e4`. |
+| `stats_summary` | 34.96 | 15.92 (GPU32) / 259.65 (Swift) / 533.68 (MLX-CPU) | 2.20x (GPU32) / 0.13x (CPU) | `moments(of:)` performs full $O(N \log N)$ sort of 5M doubles just to compute `median` and repeatedly scans 5M elements for `isFinite` and `isExactFloat32`. |
+| `rolling_mean_20` | 32.92 | 40.70 (MLX) / 342.68 (Swift) | 0.81x / 0.10x | Native mode disables `prefixSums` and falls back to $O(N \times W)$ window loop; MLX `asStrided` reduces a 2D `[N, 20]` view in $O(N \times W)$ work instead of $O(N)$ sliding window accumulation. |
+| `expanding_sum` | 30.22 | 20.11 (Swift) / 50.43 (MLX) | 1.50x / 0.60x | `DataFrame.prefixSums` boxes `NumericBuffer` into `[Double?]` (5M optionals) and `NumericEngine.prefixSums` maps it twice into `[Double]`. |
+| `arithmetic_sqrt` | 4.56 | 25.00 (MLX) / 28.48 (Swift) | 0.18x / 0.16x | Chained `(a * b + c).sqrt()` allocates intermediate arrays, converts `MLXArray` ↔ `[Double]` ↔ `ContiguousArray<Double>` 3 times on CPU, and re-scans 5M elements for `isFinite` at each step. |
+| `sort` | 478.83 | 805.59 | 0.59x | `sorted(by:)` checks `nullBitmap[i]` inside the $O(N \log N)$ comparator even when `!hasNulls`, suffers pointer-chasing cache misses, and `slice(at:)` appends element-by-element. |
+| `filter` | 26.82 | 33.89 | 0.79x | `RowPredicate` sets `mask[i] = true` bit-by-bit and `slice(mask:)` iterates row-by-row instead of scanning 64-bit words with `trailingZeroBitCount` and writing into `unsafeUninitializedCapacity`. |
+
+### 8.2 Step 1 — Zero-Boxing `groupby_sum` & `left_join` (`Bandal+Grouping.swift`, `Bandal+Joining.swift`)
+- [x] **Categorical & Typed Column GroupBy Fast-Path**:
+  - When grouping on a single `CategoricalColumn` (or `StringColumn` / `Int64Column` / `Float64Column`), build dense `Int32` group IDs directly from `codes` (`ContiguousArray<UInt32>`) and dictionary sort order in $O(K \log K)$ without `DataValue` boxing or 5M dictionary lookups.
+  - Add branchless `withUnsafeBufferPointer` scatter reductions (`.sum`, `.mean`, `.min`, `.max`, `.count`) when neither key nor target column has nulls.
+- [x] **Categorical Dictionary Mapping & 1:1 Left Join Zero-Copy Reuse**:
+  - When joining on a `CategoricalColumn` against a unique right key column, hash only the right key column and map the left `dictionary` ($K$ entries) to right row indices (`codeToRightRow`), turning 5M string hash lookups into 100 lookups and an $O(N)$ array gather.
+  - When `kind == .left` (or `.inner` with 100% match) and right keys are unique (1:1 row mapping), reuse all left `DataFrame` storage columns in $O(1)$ without slicing/copying, and gather only the newly joined right columns directly via `unsafeUninitializedCapacity`.
+  - Add typed hash-join paths for `Int64Column`, `Float64Column`, and `StringColumn` keys without materializing `[DataValue]`.
+
+### 8.3 Step 2 — $O(N)$ Sliding Windows, Unboxed Prefix Sums, Matrix Correlation & Quickselect Summary (`Bandal+Statistics.swift`, `Bandal+MLXBackend.swift`, `Bandal+Series.swift`)
+- [x] **$O(N)$ Sliding Window `rolling` Kernel**:
+  - Implement a direct single-pass $O(N)$ sliding-window accumulator (`runningSum += x[i] - x[i - w]`) on `Float64Column` for `.sum`, `.mean`, and `.count` (both native and MLX policies), eliminating the $O(N \times W)$ fallback in `.native` and the $20 \times N$ `asStrided` reduction overhead.
+- [ ] **Zero-Boxing `expanding` / `prefixSums`**:
+  - Refactor `DataFrame.prefixSums` and `NumericEngine.prefixSums` to accept `NumericBuffer` (`Float64Column`) directly instead of `[Double?]`.
+  - Add a specialized tight loop for non-null `expanding(.sum)` / `expanding(.mean)` using `unsafeUninitializedCapacity`.
+- [ ] **Upper-Triangular Native Correlation & Zero-Transpose MLX Correlation**:
+  - Native `DataFrame.pairwise` (`correlation` / `covariance`): read `NumericBuffer` `ContiguousArray<Double>` buffers directly, precompute column means/stdDevs once ($M$ columns), compute dot products only for the upper triangle ($i < j$, $M(M-1)/2 = 6$ pairs instead of 16), and mirror symmetrically.
+  - MLX `NumericEngine.covarianceOrCorrelationMatrix`: eliminate the CPU row-major manual transpose loop by stacking contiguous column buffers directly as `[M, N]` (`[columnCount, rowCount]`), centering along axis 1, and computing `MLX.matmul(centered, centered.transposed())`. Raise/normalize the GPU `Float32` magnitude gate so `gpuFloat32` executes on the Metal GPU.
+- [ ] **$O(N)$ Quickselect Median & Single-Pass `summary()` Moments**:
+  - Add `NumericEngine.summaryMoments(of: NumericBuffer)` for `Series.summary()` / `DataFrame.summary()`.
+  - Skip redundant `allSatisfy(\.isFinite)` scans on pre-validated `Float64Column` buffers and skip `isExactFloat32` unless `.gpu` policy is active.
+  - Compute `min`, `max`, `mean`, and `standardDeviation` in a single vectorized pass and compute `median` in $O(N)$ average time via Quickselect (`nth_element`) instead of full $O(N \log N)$ sort.
+
+### 8.4 Step 3 — Vectorized Arithmetic, No-Null Sort & Word-Level BitSet Slicing (`Bandal+Series.swift`, `Bandal+Sorting.swift`, `Columnar.swift`, `BitSet.swift`, `Bandal+Selection.swift`)
+- [ ] **Fast Vector Arithmetic & `sqrt` (`Accelerate` / Uninitialized Buffer Direct Write)**:
+  - Eliminate intermediate `Array` → `ContiguousArray` copies and redundant 5M-element `isFinite` rescans in `binaryArithmeticColumn` and `unaryMathColumn`.
+  - Use Apple `Accelerate` (`vDSP_vaddD`, `vDSP_vsubD`, `vDSP_vmulD`, `vDSP_vdivD`, `vvsqrt`) and `ContiguousArray(unsafeUninitializedCapacity:)` for non-null contiguous `Double` columns.
+- [ ] **No-Null Specialized Sort & Fast `slice(at:)`**:
+  - Specialize `DataFrame.sorted(by:)` when `!col.hasNulls` to sort without checking `nullBitmap` inside the comparator, and use radix/key-value pair sorting for single `Float64Column` / `CategoricalColumn` keys to eliminate pointer-chasing cache misses.
+  - Optimize `slice(at:)` across `Float64Column`, `Int64Column`, and `CategoricalColumn` using `ContiguousArray(unsafeUninitializedCapacity:)` when `!hasNulls`.
+- [ ] **64-Bit Word-Level `BitSet` Predicate Building & `slice(mask:)`**:
+  - Build `BitSet` words directly in 64-element chunks in `RowPredicate` / `Series` comparisons instead of calling `mask[i] = true` per row.
+  - Optimize `Float64Column.slice(mask:)`, `Int64Column.slice(mask:)`, and `CategoricalColumn.slice(mask:)` to allocate `unsafeUninitializedCapacity: mask.setBitCount` and iterate over non-zero 64-bit `words` using `word.trailingZeroBitCount` and `word &= word - 1`.
+
+### 8.5 Step 4 — Verification & Re-Benchmarking
+- [x] Verify all existing and new unit tests pass (`swift test` and `Scripts/test-with-mlx.sh`).
+- [ ] Re-run `Scripts/benchmark.sh` across 100k, 1M, and 5M rows and verify `match: ok` checksum parity with `pandas` across all 4 execution policies (`native`, `cpu`, `gpu`, `gpu_f32`).
+
+---
+
+# Phase 9 — Close the Remaining Gaps vs Pandas (Latest `benchmark.sh` Results)
+
+Goal: every workload reaches ≥ 1.0x vs pandas in all execution policies (`native`, `cpu`, `gpu`, `gpu_f32`) with `match: ok`. Per AGENTS.md §4, MLX stays the numeric engine where it wins; memory-bound or sequential kernels fall back to native Swift automatically. Public API signatures stay unchanged (AGENTS.md §2, §3, §5).
+
+### 9.1 Baseline Diagnosis
+| Workload | Rows | Result vs pandas | Root cause |
+|---|---|---|---|
+| `arithmetic_sqrt` | 1M / 5M | 0.74x–0.88x (all policies) | `multiply` → `add` → `sqrt` run as 3 passes, each allocating a `Float64Column` plus a `vDSP_sveD` finite-check pass in `unaryMathColumn`. Memory-bound; MLX adds no value. |
+| `rolling_mean_20` | all | 0.49x–0.60x (MLX policies only) | `DataFrame.prefixSums(of:for:)` is routed through `NumericEngine.prefixSums(values:)`: boxes into `[Double?]`, two `map`s, two MLX `cumsum`s, copy back, `[Double]` → `[Int]` conversion. |
+| `expanding_sum` | all | 0.54x–0.61x (MLX policies only) | Same MLX prefix-sum route, although the single-pass `runningColumn` already exists. |
+| `stats_summary` | 100k–5M | 1.1x–1.6x (marginal) | Median uses a full sort; moments are computed in separate passes. |
+| `rolling_mean_20` / `expanding_sum` | all | 1.4x / 2.5x (native) | Prefix arrays (`[Double]` + `[Int]`) allocated even without nulls. |
+
+### 9.2 Step 1 — Native Scan Routing for `rolling` / `expanding` (`Bandal+Statistics.swift`, `Bandal+MLXBackend.swift`)
+- [x] **Stop selecting MLX for sequential scans**:
+  - In `DataFrame.rolling(_:window:minPeriods:using:)` and `DataFrame.expanding(_:using:)`, remove the `NumericEngine.prefixSums(values:)` branch for `.sum`, `.mean`, `.count`.
+  - Delete `NumericEngine.prefixSums(values:)` and `nativePrefixSumMinimumCount` if no test or caller depends on them; otherwise keep it internal and unused by the automatic policy.
+  - Keep MLX only for `rollingWindowNoNulls` (`.min`, `.max`, `.variance`, `.standardDeviation`), where strided reductions are not a sequential scan.
+- [x] **Update doc comments** on `rolling` / `expanding` that currently state "Large inputs compute `sum`, `mean`, and `count` from MLX prefix sums".
+
+### 9.3 Step 2 — Single-Pass Sliding `rolling` and `expanding` Kernels
+- [x] **No-null fast path for `rolling(.sum / .mean / .count)`**:
+  - One loop with a running sum/count: add `x[i]`, subtract `x[i - window]`; write directly into `ContiguousArray(unsafeUninitializedCapacity:)` through `withUnsafeBufferPointer`; no prefix arrays, no per-row bitmap checks.
+  - Use Neumaier-compensated summation (or a periodic exact recompute every N rows) so results still match pandas checksums.
+  - Rows before `minPeriods` are set in the null bitmap with word-level `BitSet` writes.
+- [x] **Null-aware sliding path**: same single-pass accumulator that also tracks the valid count; replaces the prefix-array path so the `[Int]` counts array is never allocated.
+- [x] **No-null fast path for `expanding(.sum / .mean / .count)`**: specialize `runningColumn` for `!hasNulls` (no `srcNulls[i]` reads, no min/max/first/last bookkeeping unless requested) with `unsafeUninitializedCapacity`; fall back to the existing generic loop when nulls are present or the result is non-finite.
+
+### 9.4 Step 3 — Fused `arithmetic_sqrt` (`Bandal+Series.swift`, `Bandal+AdvancedAnalytics.swift`, `Bandal+MLXBackend.swift`)
+- [x] **Single allocation for `a * b + c` → `sqrt`**:
+  - For non-null, equal-length `Float64Column` operands use Accelerate (`vDSP_vmulD`, `vDSP_vaddD`, `vDSP_vmaD`) writing directly into the output buffer; evaluate `sqrt` in place with `vvsqrt` on the final buffer.
+  - Consider an internal chained-expression fast path (no public API change) so intermediate `Series` results reuse their uniquely referenced buffer (`isKnownUniquelyReferenced`) and avoid new allocations.
+- [x] **Remove redundant finite-check passes in `unaryMathColumn`**:
+  - Replace the unconditional `vDSP_sveD` checksum with a domain-aware check (`sqrt`/`log` negative inputs → `.missing`) folded into the vector op, or run it only when the input is not already known finite.
+  - Preserve semantics: domain violations (`sqrt(-1)`, `log(-1)`) must still become `.missing`, not `NaN`.
+- [x] **Keep GPU `Float32` off the automatic path for light element-wise ops**: conversion cost (`Double` ↔ `Float`) dominates; only explicit `.gpu` / `.gpuFloat32` policies may use it.
+
+### 9.5 Step 4 — Execution-Policy Audit (`Bandal+MLXBackend.swift`)
+- [x] Review `MLXBackend.shouldUse(elementCount:minimumCount:)` call sites; ensure `.automatic` never selects MLX for scans (`cumsum`, `rolling`/`expanding` sum/mean/count) or light element-wise arithmetic.
+- [x] Keep MLX for kernels where it wins (`stats_summary` at ≥ 1M, `correlation`, matmul, sort-assisted statistics).
+- [ ] Document the selection rule next to `automaticMinimumCount` / `automaticComplexMinimumCount`.
+
+### 9.6 Step 5 — `stats_summary` Small/Medium Row Counts (`Bandal+MLXBackend.swift`, `Bandal+Series.swift`)
+Deferred: `stats_summary` already measures ≥ 1.03x vs pandas in every policy after Steps 1–3; revisit for further headroom.
+- [ ] Complete the pending `NumericEngine.summaryMoments(of:)` item from Phase 8.3: single-pass `min`, `max`, `mean`, `standardDeviation` on `NumericBuffer`, Quickselect for `median`.
+- [ ] Skip `allSatisfy(\.isFinite)` / `isExactFloat32` scans on pre-validated `Float64Column` buffers unless `.gpu` policy is active.
+
+### 9.7 Step 6 — Tests
+- [x] `StatisticsTests`: `rolling` and `expanding` (`sum`, `mean`, `count`) on ≥ 4,096 rows with and without nulls, `minPeriods` < `window`, and parity across `.native`, `.cpu`, `.gpu`, `.gpuFloat32` policies.
+- [x] `StatisticsTests`: chained `multiply` → `add` → `sqrt` equals the unfused result, including negative inputs → `.missing`, and nulls propagate.
+- [x] Regression test for compensated sliding sums (large magnitude differences, e.g. `1e12` followed by small values).
+
+### 9.8 Step 7 — Verification, Benchmarks & Bilingual Documentation (AGENTS.md §6)
+- [x] `swift test` and `Scripts/test-with-mlx.sh` pass.
+- [x] Re-run `Scripts/benchmark.sh` (100k, 1M, 5M): all workloads ≥ 1.0x vs pandas, `match: ok`, MLX columns for `rolling_mean_20` / `expanding_sum` within ~10% of the Swift column.
+- [x] Update `CHANGELOG.md`, `Documentation/API.md` ↔ `Documentation/API.ko.md`, and `README.md` ↔ `README.ko.md` (benchmark tables and execution-policy notes) in lockstep.

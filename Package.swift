@@ -34,6 +34,13 @@ let package = Package(
             name: "BandalBenchmarks",
             dependencies: ["Bandal"],
         ),
+        .executableTarget(
+            name: "BandalPandasBenchmark",
+            dependencies: ["Bandal"],
+            path: "Scripts",
+            exclude: ["benchmark.py", "benchmark_compare.py", "benchmark.sh", "test-with-mlx.sh"],
+            sources: ["benchmark.swift"],
+        ),
         .testTarget(
             name: "BandalTests",
             dependencies: [

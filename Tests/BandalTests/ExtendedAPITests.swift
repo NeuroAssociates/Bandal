@@ -356,6 +356,6 @@ private func frame() throws -> DataFrame {
     #expect(resampled.rowCount == 2)
     #expect(try resampled.values(in: "sum_v") == [4.0, 10.0])
 
-    let pipedCount = try tsFrame.pipe { $0.rowCount }
+    let pipedCount = tsFrame.pipe { $0.rowCount }
     #expect(pipedCount == 3)
 }
