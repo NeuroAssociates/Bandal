@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `Scripts/benchmark.sh`: pandas vs Bandal (native Swift, MLX CPU, MLX GPU) comparison that provisions a `uv` environment, builds the new `BandalPandasBenchmark` target, and prints computation-only timings with checksum verification (`benchmark.py`, `benchmark.swift`, `benchmark_compare.py`).
+
 ## [0.1.1] - 2026-10-24
 
 ### Added
