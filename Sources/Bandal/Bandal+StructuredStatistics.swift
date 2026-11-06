@@ -12,8 +12,27 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
     /// Underlying contiguous storage: one `Double` per row. Placeholder `0` is
     /// used for missing rows; callers must consult `nullBitmap` / `isMissing`.
     let floatColumn: Float64Column
-    /// Pre-extracted non-missing numeric values in row order.
-    let numbers: [Double]
+    let nonMissingCount: Int
+    let hasMissing: Bool
+    private let _cachedNumbers: [Double]?
+
+    /// Non-missing numeric values in row order. Materialized lazily when not pre-cached.
+    var numbers: [Double] {
+        if let cached = _cachedNumbers {
+            return cached
+        }
+        if !hasMissing {
+            return Array(floatColumn.values)
+        }
+        var compact: [Double] = []
+        compact.reserveCapacity(nonMissingCount)
+        let vals = floatColumn.values
+        let bm = floatColumn.nullBitmap
+        for i in 0..<vals.count where !bm[i] {
+            compact.append(vals[i])
+        }
+        return compact
+    }
 
     var values: [Double] { Array(floatColumn.values) }
     var nullBitmap: BitSet { floatColumn.nullBitmap }
@@ -27,46 +46,40 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
     }
 
     var count: Int { floatColumn.count }
-    var nonMissingCount: Int { numbers.count }
-    var hasMissing: Bool { numbers.count != floatColumn.count }
 
     var isExactFloat32: Bool {
-        MLXBackend.isExactFloat32(numbers)
+        if !hasMissing {
+            return MLXBackend.isExactFloat32(floatColumn.values)
+        }
+        return MLXBackend.isExactFloat32(numbers)
     }
 
     init(floatColumn: Float64Column) {
         self.floatColumn = floatColumn
-        if !floatColumn.hasNulls {
-            self.numbers = Array(floatColumn.values)
-        } else {
-            var compact: [Double] = []
-            compact.reserveCapacity(floatColumn.validCount)
-            let vals = floatColumn.values
-            let bm = floatColumn.nullBitmap
-            for i in 0..<vals.count where !bm[i] {
-                compact.append(vals[i])
-            }
-            self.numbers = compact
-        }
+        let nullCount = floatColumn.nullBitmap.setBitCount
+        self.nonMissingCount = floatColumn.count - nullCount
+        self.hasMissing = nullCount != 0
+        self._cachedNumbers = nil
     }
 
     init(intColumn: Int64Column) {
-        var dblVals = ContiguousArray<Double>()
-        dblVals.reserveCapacity(intColumn.count)
-        var compact: [Double] = []
-        compact.reserveCapacity(intColumn.validCount)
-        let intVals = intColumn.values
+        let count = intColumn.count
         let bm = intColumn.nullBitmap
         let hasNulls = intColumn.hasNulls
-        for i in 0..<intVals.count {
-            let d = Double(intVals[i])
-            dblVals.append(d)
-            if !hasNulls || !bm[i] {
-                compact.append(d)
+        let dblVals = ContiguousArray<Double>(unsafeUninitializedCapacity: count) { buf, initCount in
+            intColumn.values.withUnsafeBufferPointer { intBuf in
+                guard let inBase = intBuf.baseAddress, let outBase = buf.baseAddress else { return }
+                for i in 0..<count {
+                    outBase[i] = Double(inBase[i])
+                }
             }
+            initCount = count
         }
         self.floatColumn = Float64Column(name: intColumn.name, values: dblVals, nullBitmap: bm)
-        self.numbers = compact
+        let nullCount = hasNulls ? bm.setBitCount : 0
+        self.nonMissingCount = count - nullCount
+        self.hasMissing = nullCount != 0
+        self._cachedNumbers = nil
     }
 
     init(values: [Double], isMissing: [Bool]) {
@@ -81,26 +94,29 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
             }
         }
         self.floatColumn = Float64Column(name: "", values: ContiguousArray(values), nullBitmap: bm)
-        self.numbers = compact
+        self.nonMissingCount = compact.count
+        self.hasMissing = compact.count != values.count
+        self._cachedNumbers = compact
     }
 
     init(numbers: [Double], name: String = "") {
         self.floatColumn = Float64Column(name: name, numbers: numbers)
-        self.numbers = numbers
+        self.nonMissingCount = numbers.count
+        self.hasMissing = false
+        self._cachedNumbers = numbers
     }
 
     init?(dataValues: [DataValue], name: String = "") {
         var vals = ContiguousArray<Double>()
         vals.reserveCapacity(dataValues.count)
         var bm = BitSet(count: dataValues.count)
-        var compact: [Double] = []
-        compact.reserveCapacity(dataValues.count)
+        var validCount = 0
 
         for (index, value) in dataValues.enumerated() {
             switch value {
             case .number(let number):
                 vals.append(number)
-                compact.append(number)
+                validCount += 1
             case .missing:
                 vals.append(0)
                 bm[index] = true
@@ -109,7 +125,9 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
             }
         }
         self.floatColumn = Float64Column(name: name, values: vals, nullBitmap: bm)
-        self.numbers = compact
+        self.nonMissingCount = validCount
+        self.hasMissing = validCount != dataValues.count
+        self._cachedNumbers = nil
     }
 
     static func == (lhs: NumericBuffer, rhs: NumericBuffer) -> Bool {
@@ -152,9 +170,25 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
     }
 
     static func makeColumn(name: String, values: ContiguousArray<Double>, nullBitmap: BitSet) -> Float64Column {
+        let count = values.count
+        if !nullBitmap.mayHaveTrueBits {
+            var anyNonFinite = false
+            values.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                for i in 0..<count {
+                    if !base[i].isFinite {
+                        anyNonFinite = true
+                        break
+                    }
+                }
+            }
+            if !anyNonFinite {
+                return Float64Column(name: name, values: values, nullBitmap: nullBitmap)
+            }
+        }
         var vals = values
         var bm = nullBitmap
-        for index in 0..<vals.count where !bm[index] && !vals[index].isFinite {
+        for index in 0..<count where !bm[index] && !vals[index].isFinite {
             vals[index] = 0.0
             bm[index] = true
         }

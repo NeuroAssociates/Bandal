@@ -55,8 +55,9 @@ extension DataFrame {
     /// when the window has at least `minPeriods` total rows). The output column
     /// is named `column_operation_rolling_window`.
     ///
-    /// Large inputs compute `sum`, `mean`, and `count` from MLX prefix sums in
-    /// O(n) and non-null `min`, `max`, `variance`, and `standardDeviation` via
+    /// `sum`, `mean`, and `count` use a native single-pass O(n) sliding
+    /// accumulator (sequential scans are memory-bound, so MLX is not used) and
+    /// large non-null `min`, `max`, `variance`, and `standardDeviation` via
     /// 2D strided MLX reductions (`MLX.asStrided`).
     public func rolling(
         _ column: String,
@@ -88,32 +89,15 @@ extension DataFrame {
             return try withColumn(storage: stridedCol)
         }
 
-        if let prefix = prefixSums(of: buffer, for: operation) {
-            var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
-            var outNulls = BitSet(count: n)
-            for row in 0..<n {
-                let windowRows = Swift.min(row + 1, window)
-                guard windowRows >= requiredPeriods else {
-                    outNulls[row] = true
-                    continue
-                }
-                let start = row - window
-                let validCount = prefix.counts[row] - (start >= 0 ? prefix.counts[start] : 0)
-                if operation == .count {
-                    outVals[row] = Double(validCount)
-                } else if validCount > 0 && (minPeriods == nil || validCount >= requiredPeriods) {
-                    let s = prefix.sums[row] - (start >= 0 ? prefix.sums[start] : 0)
-                    let val = operation == .sum ? s : s / Double(validCount)
-                    if val.isFinite {
-                        outVals[row] = val
-                    } else {
-                        outNulls[row] = true
-                    }
-                } else {
-                    outNulls[row] = true
-                }
-            }
-            return try withColumn(storage: Float64Column(name: outputName, values: outVals, nullBitmap: outNulls))
+        if let slidingCol = Self.slidingColumn(
+            buffer,
+            name: outputName,
+            window: window,
+            requiredPeriods: requiredPeriods,
+            explicitMinPeriods: minPeriods != nil,
+            operation: operation
+        ) {
+            return try withColumn(storage: slidingCol)
         }
 
         var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
@@ -222,7 +206,6 @@ extension DataFrame {
     /// `count` and missing otherwise. The output column is named
     /// `column_operation_expanding`.
     ///
-    /// Large inputs compute `sum`, `mean`, and `count` from MLX prefix sums.
     /// Native `count`, `sum`, `mean`, `min`, `max`, `first`, and `last` run in
     /// O(n); `median`, `variance`, and `standardDeviation` are O(n²).
     public func expanding(
@@ -235,27 +218,8 @@ extension DataFrame {
         }
 
         let buffer = try numericBuffer(in: column)
-        let n = buffer.count
-        if let prefix = prefixSums(of: buffer, for: operation) {
-            var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
-            var outNulls = BitSet(count: n)
-            for row in 0..<n {
-                let count = prefix.counts[row]
-                if operation == .count {
-                    outVals[row] = Double(count)
-                } else if count > 0 {
-                    let s = prefix.sums[row]
-                    let v = operation == .sum ? s : s / Double(count)
-                    if v.isFinite {
-                        outVals[row] = v
-                    } else {
-                        outNulls[row] = true
-                    }
-                } else {
-                    outNulls[row] = true
-                }
-            }
-            return try withColumn(storage: Float64Column(name: outputName, values: outVals, nullBitmap: outNulls))
+        if let accumulated = Self.expandingAccumulatedColumn(buffer, name: outputName, operation: operation) {
+            return try withColumn(storage: accumulated)
         }
         if let runningCol = Self.runningColumn(buffer, name: outputName, operation: operation) {
             return try withColumn(storage: runningCol)
@@ -321,20 +285,127 @@ extension DataFrame {
         return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
     }
 
-    /// Prefix sums for `sum`, `mean`, and `count` when MLX is selected.
-    private func prefixSums(
-        of buffer: NumericBuffer,
-        for operation: AggregateFunction
-    ) -> (sums: [Double], counts: [Int])? {
-        guard operation == .sum || operation == .mean || operation == .count else {
-            return nil
+    /// Neumaier-compensated running sum so add/subtract sliding windows stay
+    /// accurate when large and small magnitudes mix.
+    private struct CompensatedSum {
+        var sum = 0.0
+        var compensation = 0.0
+
+        var value: Double { sum + compensation }
+
+        @inline(__always)
+        mutating func add(_ x: Double) {
+            let t = sum + x
+            if Swift.abs(sum) >= Swift.abs(x) {
+                compensation += (sum - t) + x
+            } else {
+                compensation += (x - t) + sum
+            }
+            sum = t
         }
-        let srcVals = buffer.floatColumn.values
+    }
+
+    /// Single-pass O(n) sliding `sum`, `mean`, and `count` without prefix arrays.
+    /// Returns `nil` when the operation is unsupported or a non-finite value
+    /// would poison the running sum, so callers use the exact window fallback.
+    private static func slidingColumn(
+        _ buffer: NumericBuffer,
+        name: String,
+        window: Int,
+        requiredPeriods: Int,
+        explicitMinPeriods: Bool,
+        operation: AggregateFunction
+    ) -> Float64Column? {
+        guard operation == .sum || operation == .mean || operation == .count else { return nil }
+        let n = buffer.count
+        let hasNulls = buffer.floatColumn.nullBitmap.mayHaveTrueBits
         let srcNulls = buffer.floatColumn.nullBitmap
-        let numbers = (0..<buffer.count).map { index -> Double? in
-            srcNulls[index] ? nil : srcVals[index]
+        var outNulls = BitSet(count: n)
+        var failed = false
+
+        let outVals = ContiguousArray<Double>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+            buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                guard let src = inBuf.baseAddress, let out = outBuf.baseAddress else { return }
+                var running = CompensatedSum()
+                var validCount = 0
+                for row in 0..<n {
+                    if !hasNulls || !srcNulls[row] {
+                        let x = src[row]
+                        guard x.isFinite else { failed = true; break }
+                        running.add(x)
+                        validCount += 1
+                    }
+                    let leaving = row - window
+                    if leaving >= 0, !hasNulls || !srcNulls[leaving] {
+                        running.add(-src[leaving])
+                        validCount -= 1
+                    }
+                    out[row] = 0
+                    guard Swift.min(row + 1, window) >= requiredPeriods else {
+                        outNulls[row] = true
+                        continue
+                    }
+                    if operation == .count {
+                        out[row] = Double(validCount)
+                    } else if validCount > 0 && (!explicitMinPeriods || validCount >= requiredPeriods) {
+                        let s = running.value
+                        let value = operation == .sum ? s : s / Double(validCount)
+                        if value.isFinite {
+                            out[row] = value
+                        } else {
+                            outNulls[row] = true
+                            }
+                    } else {
+                        outNulls[row] = true
+                    }
+                }
+                initCount = failed ? 0 : n
+            }
         }
-        return NumericEngine.prefixSums(values: numbers)
+        if failed { return nil }
+        return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+    }
+
+    /// Single-pass O(n) expanding `sum`, `mean`, and `count`.
+    private static func expandingAccumulatedColumn(
+        _ buffer: NumericBuffer,
+        name: String,
+        operation: AggregateFunction
+    ) -> Float64Column? {
+        guard operation == .sum || operation == .mean || operation == .count else { return nil }
+        let n = buffer.count
+        let hasNulls = buffer.floatColumn.nullBitmap.mayHaveTrueBits
+        let srcNulls = buffer.floatColumn.nullBitmap
+        var outNulls = BitSet(count: n)
+
+        let outVals = ContiguousArray<Double>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+            buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                guard let src = inBuf.baseAddress, let out = outBuf.baseAddress else { return }
+                var sum = 0.0
+                var count = 0
+                for row in 0..<n {
+                    if !hasNulls || !srcNulls[row] {
+                        sum += src[row]
+                        count += 1
+                    }
+                    out[row] = 0
+                    if operation == .count {
+                        out[row] = Double(count)
+                    } else if count > 0 {
+                        let value = operation == .sum ? sum : sum / Double(count)
+                        if value.isFinite {
+                            out[row] = value
+                        } else {
+                            outNulls[row] = true
+                        }
+                    } else {
+                        outNulls[row] = true
+                    }
+                }
+            }
+            initCount = n
+        }
+        return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
     }
 
     func aggregateWindow(

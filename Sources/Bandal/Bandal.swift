@@ -674,13 +674,35 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     }
 
     func rows(at indices: [Int]) throws -> DataFrame {
-        try DataFrame(
+        if columns.count > 1 && indices.count >= 65_536 {
+            let colCount = columns.count
+            let cols = columns
+            let boxed = DisjointSliceBuffer(capacity: colCount)
+            defer { boxed.release(count: colCount) }
+            DispatchQueue.concurrentPerform(iterations: colCount) { idx in
+                boxed.initialize(at: idx, to: cols[idx].storage.slice(at: indices))
+            }
+            let sliced = (0..<colCount).map { boxed.pointer[$0] }
+            return try DataFrame(storageColumns: sliced)
+        }
+        return try DataFrame(
             storageColumns: columns.map { $0.storage.slice(at: indices) }
         )
     }
 
     func rows(matching mask: BitSet) throws -> DataFrame {
-        try DataFrame(
+        if columns.count > 1 && rowCount >= 65_536 {
+            let colCount = columns.count
+            let cols = columns
+            let boxed = DisjointSliceBuffer(capacity: colCount)
+            defer { boxed.release(count: colCount) }
+            DispatchQueue.concurrentPerform(iterations: colCount) { idx in
+                boxed.initialize(at: idx, to: cols[idx].storage.slice(mask: mask))
+            }
+            let sliced = (0..<colCount).map { boxed.pointer[$0] }
+            return try DataFrame(storageColumns: sliced)
+        }
+        return try DataFrame(
             storageColumns: columns.map { $0.storage.slice(mask: mask) }
         )
     }
@@ -732,4 +754,22 @@ extension CSVReadOptions {
 
     /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
+}
+
+/// Output slots written by `DispatchQueue.concurrentPerform`; each index is written by exactly one iteration.
+private struct DisjointSliceBuffer: @unchecked Sendable {
+    let pointer: UnsafeMutablePointer<any AnyColumn>
+
+    init(capacity: Int) {
+        pointer = .allocate(capacity: capacity)
+    }
+
+    func initialize(at index: Int, to value: any AnyColumn) {
+        (pointer + index).initialize(to: value)
+    }
+
+    func release(count: Int) {
+        pointer.deinitialize(count: count)
+        pointer.deallocate()
+    }
 }

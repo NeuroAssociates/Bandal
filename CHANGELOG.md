@@ -5,6 +5,10 @@
 ### Added
 - `Scripts/benchmark.sh`: pandas vs Bandal (native Swift, MLX CPU, MLX GPU) comparison that provisions a `uv` environment, builds the new `BandalPandasBenchmark` target, and prints computation-only timings with checksum verification (`benchmark.py`, `benchmark.swift`, `benchmark_compare.py`).
 
+### Performance
+- `rolling` / `expanding` `sum`, `mean`, `count` use a native single-pass O(n) kernel (Neumaier-compensated for sliding windows) instead of MLX prefix sums, now 2.6x (`rolling`) and 5x (`expanding`) faster than pandas on 1M–5M rows in all execution policies.
+- Element-wise `+`, `-`, `*`, `/` and `sqrt` use a single-pass SIMD kernel that folds the finite check into the write loop, and the native-policy fallback shares it; `sqrt`/`sign` no longer use the GPU `Float32` path. `arithmetic_sqrt` is now ≥ 1.05x vs pandas in all policies.
+
 ## [0.1.1] - 2026-10-24
 
 ### Added

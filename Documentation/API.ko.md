@@ -799,7 +799,7 @@ print(t)
 
 ### 행 개수 기반 롤링 윈도우 (`rolling(_:window:minPeriods:using:)`)
 
-직전 `window`개 행에 대해 `AggregateFunction`을 계산합니다. 기본값(`minPeriods == nil`)에서는 첫 윈도우가 채워지기 전 위치(`0 ..< window - 1`)가 `.missing`이 되며, `minPeriods`(`1...window`)를 지정하면 부분 윈도우에 대해서도 집계를 계산합니다. 대규모 `.sum`, `.mean`, `.count` 윈도우는 MLX 누적합(prefix sum)으로, 결측이 없는 `.min`, `.max`, `.variance`, `.standardDeviation` 윈도우는 2D `MLX.asStrided` 축소 연산으로 벡터화됩니다.
+직전 `window`개 행에 대해 `AggregateFunction`을 계산합니다. 기본값(`minPeriods == nil`)에서는 첫 윈도우가 채워지기 전 위치(`0 ..< window - 1`)가 `.missing`이 되며, `minPeriods`(`1...window`)를 지정하면 부분 윈도우에 대해서도 집계를 계산합니다. `.sum`, `.mean`, `.count` 윈도우는 네이티브 단일 패스 O(n) 슬라이딩 누적기로(순차 스캔은 메모리 대역폭에 묶여 있어 MLX를 사용하지 않습니다), 결측이 없는 `.min`, `.max`, `.variance`, `.standardDeviation` 윈도우는 2D `MLX.asStrided` 축소 연산으로 벡터화됩니다.
 
 ```swift
 let rolled = try df.rolling("temp", window: 3, minPeriods: 1, using: .mean)
@@ -872,7 +872,7 @@ Bandal의 `NumericEngine`은 다음 연산들에 MLX Swift를 사용합니다:
 - 단일 평가(`MLX.eval`)로 융합된 기술 통계 모멘트 계산 (`summary`, `statistics`, `describe`, `describeStructured`)
 - 단일 컬럼 및 전체 프레임 축소 연산 (`sum`, `mean`, `min`, `max`, `count`, `variance`, `standardDeviation`)
 - 그룹별 축소 연산 (`groupBy.aggregate`, `groupBy.transform`, `pivotTable`)
-- 누적합(prefix sum) 및 2D `MLX.asStrided` 기반 롤링/확장 윈도우
+- `min`, `max`, `variance`, `standardDeviation` 롤링 윈도우의 2D `MLX.asStrided` 축소 (순차 `sum`/`mean`/`count` 스캔은 네이티브로 유지)
 - 박싱 없는 `Float64Column` ↔ `MLXArray` 원소별 단항/이항/거듭제곱/초월함수 수치 연산 (`combining`, `scaling`, `Series`의 `+`, `-`, `*`, `/`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`, `cumulative`, `applying(_: UnaryMathFunction)`, `power`)
 - `MLX.matmul`을 활용한 쌍별 `covariance()` 및 `correlation()` 행렬 계산
 

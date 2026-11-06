@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 
 /// A single named column of a ``DataFrame``.
@@ -268,21 +269,13 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
     /// Summary statistics when the series is numeric.
     public func summary() -> ColumnSummary? {
-        guard let buffer = numericBuffer, !buffer.numbers.isEmpty else { return nil }
-        let moments = NumericEngine.moments(of: buffer.numbers)
-        return ColumnSummary(
-            count: moments.count,
-            mean: moments.mean,
-            standardDeviation: moments.standardDeviation,
-            median: moments.median,
-            min: moments.min,
-            max: moments.max
-        )
+        guard let buffer = numericBuffer, buffer.nonMissingCount > 0 else { return nil }
+        return NumericEngine.summaryMoments(of: buffer)
     }
 
     /// Structured statistics (including quartiles) when the series is numeric.
     public func statistics() -> ColumnStatistics? {
-        guard let buffer = numericBuffer, !buffer.numbers.isEmpty else { return nil }
+        guard let buffer = numericBuffer, buffer.nonMissingCount > 0 else { return nil }
         return ColumnStatistics(buffer: buffer)
     }
 
@@ -609,30 +602,46 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         if let col = NumericEngine.scalarArithmeticColumn(buffer: buffer, name: name, scalar: scalar, operation: operation) {
             return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let srcVals = buffer.floatColumn.values
-        var outVals = ContiguousArray<Double>(repeating: 0.0, count: buffer.count)
-        var outNulls = buffer.floatColumn.nullBitmap
-        if operation == .divide && scalar == 0 {
-            outNulls = BitSet(count: buffer.count, repeating: true)
-            let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        let n = buffer.count
+        if !scalar.isFinite || (operation == .divide && scalar == 0) {
+            let col = Float64Column(
+                name: name,
+                values: ContiguousArray(repeating: 0.0, count: n),
+                nullBitmap: BitSet(count: n, repeating: true)
+            )
             return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        for i in 0..<srcVals.count where !outNulls[i] {
-            let number = srcVals[i]
-            let result: Double
-            switch operation {
-            case .add: result = number + scalar
-            case .subtract: result = number - scalar
-            case .multiply: result = number * scalar
-            case .divide: result = number / scalar
+        if n > 0 {
+            var checkSum = Double.nan
+            let raw = ContiguousArray<Double>(unsafeUninitializedCapacity: n) { outBuf, initCount in
+                buffer.floatColumn.values.withUnsafeBufferPointer { inBuf in
+                    guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                    let len = vDSP_Length(n)
+                    var s = scalar
+                    switch operation {
+                    case .add:
+                        vDSP_vsaddD(inBase, 1, &s, outBase, 1, len)
+                    case .subtract:
+                        var negS = -scalar
+                        vDSP_vsaddD(inBase, 1, &negS, outBase, 1, len)
+                    case .multiply:
+                        vDSP_vsmulD(inBase, 1, &s, outBase, 1, len)
+                    case .divide:
+                        vDSP_vsdivD(inBase, 1, &s, outBase, 1, len)
+                    }
+                    vDSP_sveD(outBase, 1, &checkSum, len)
+                }
+                initCount = n
             }
-            if result.isFinite {
-                outVals[i] = result
-            } else {
-                outNulls[i] = true
+            let nulls = buffer.floatColumn.nullBitmap
+            if !nulls.mayHaveTrueBits && checkSum.isFinite {
+                let col = Float64Column(name: name, values: raw, nullBitmap: nulls)
+                return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
             }
+            let col = NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        let col = Float64Column(name: name, values: [], nullBitmap: BitSet())
         return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
@@ -654,32 +663,17 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         if let col = NumericEngine.binaryArithmeticColumn(left: leftBuffer, right: rightBuffer, name: name, operation: operation) {
             return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let lVals = leftBuffer.floatColumn.values
-        let rVals = rightBuffer.floatColumn.values
-        var outVals = ContiguousArray<Double>(repeating: 0.0, count: count)
-        var outNulls = leftBuffer.floatColumn.nullBitmap.bitwiseOr(rightBuffer.floatColumn.nullBitmap)
-        for row in 0..<count where !outNulls[row] {
-            let a = lVals[row]
-            let b = rVals[row]
-            let result: Double
-            switch operation {
-            case .add: result = a + b
-            case .subtract: result = a - b
-            case .multiply: result = a * b
-            case .divide:
-                guard b != 0 else {
-                    outNulls[row] = true
-                    continue
-                }
-                result = a / b
-            }
-            if result.isFinite {
-                outVals[row] = result
-            } else {
-                outNulls[row] = true
-            }
+        let n = count
+        if n == 0 {
+            let col = Float64Column(name: name, values: [], nullBitmap: BitSet())
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        let col = NumericEngine.nativeBinaryArithmeticColumn(
+            left: leftBuffer,
+            right: rightBuffer,
+            name: name,
+            operation: operation
+        )
         return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
@@ -937,30 +931,7 @@ extension DataFrame {
     /// Large frames compute the covariance matrix via MLX (`float64` on CPU
     /// stream); rows where either column is missing are ignored for that pair.
     public func covariance() throws -> DataFrame {
-        let numericColumns = columns.filter { (try? dataType(of: $0.name)) == .number }
-        guard !numericColumns.isEmpty else { throw DataFrameError.emptyColumns }
-        let buffers = numericColumns.compactMap(\.numericBuffer)
-        if buffers.count == numericColumns.count,
-           let matrix = NumericEngine.covarianceOrCorrelationMatrix(
-               buffers: buffers,
-               rowCount: rowCount,
-               correlation: false
-           )
-        {
-            return try DataFrame(columns: numericColumns.indices.map { j in
-                (
-                    name: numericColumns[j].name,
-                    values: (0..<numericColumns.count).map { i in
-                        matrix[i][j].map(DataValue.number) ?? .missing
-                    }
-                )
-            })
-        }
-        return try pairwise { x, y in
-            guard x.count > 1 else { return nil }
-            let mx = x.reduce(0, +) / Double(x.count), my = y.reduce(0, +) / Double(y.count)
-            return zip(x, y).reduce(0) { $0 + ($1.0 - mx) * ($1.1 - my) } / Double(x.count - 1)
-        }
+        try computePairwiseMatrix(correlation: false)
     }
 
     /// Pairwise Pearson correlation of numeric columns.
@@ -968,29 +939,162 @@ extension DataFrame {
     /// Large frames compute the correlation matrix via MLX (`float64` on CPU
     /// stream); rows where either column is missing are ignored for that pair.
     public func correlation() throws -> DataFrame {
+        try computePairwiseMatrix(correlation: true)
+    }
+
+    private func computePairwiseMatrix(correlation: Bool) throws -> DataFrame {
         let numericColumns = columns.filter { (try? dataType(of: $0.name)) == .number }
         guard !numericColumns.isEmpty else { throw DataFrameError.emptyColumns }
         let buffers = numericColumns.compactMap(\.numericBuffer)
-        if buffers.count == numericColumns.count,
-           let matrix = NumericEngine.covarianceOrCorrelationMatrix(
-               buffers: buffers,
-               rowCount: rowCount,
-               correlation: true
-           )
-        {
+        let columnCount = numericColumns.count
+
+        if buffers.count == columnCount {
+            if let matrix = NumericEngine.covarianceOrCorrelationMatrix(
+                buffers: buffers,
+                rowCount: rowCount,
+                correlation: correlation
+            ) {
+                return try DataFrame(columns: numericColumns.indices.map { j in
+                    (
+                        name: numericColumns[j].name,
+                        values: (0..<columnCount).map { i in
+                            matrix[i][j].map(DataValue.number) ?? .missing
+                        }
+                    )
+                })
+            }
+
+            // Native upper-triangular columnar fast path (zero DataValue boxing).
+            var matrix = Array(
+                repeating: Array(repeating: Double?.none, count: columnCount),
+                count: columnCount
+            )
+
+            if rowCount >= 2 && buffers.allSatisfy({ !$0.hasMissing }) {
+                let len = vDSP_Length(rowCount)
+                let invDenom = 1.0 / Double(rowCount - 1)
+                var centeredColumns: [ContiguousArray<Double>] = []
+                centeredColumns.reserveCapacity(columnCount)
+
+                for col in 0..<columnCount {
+                    let centered = ContiguousArray<Double>(unsafeUninitializedCapacity: rowCount) { outBuf, initCount in
+                        buffers[col].floatColumn.values.withUnsafeBufferPointer { inBuf in
+                            guard let inBase = inBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                            var mean = 0.0
+                            vDSP_meanvD(inBase, 1, &mean, len)
+                            var negMean = -mean
+                            vDSP_vsaddD(inBase, 1, &negMean, outBase, 1, len)
+                        }
+                        initCount = rowCount
+                    }
+                    centeredColumns.append(centered)
+                }
+
+                var covMatrix = [Double](repeating: 0.0, count: columnCount * columnCount)
+                for i in 0..<columnCount {
+                    centeredColumns[i].withUnsafeBufferPointer { iBuf in
+                        guard let iBase = iBuf.baseAddress else { return }
+                        for j in i..<columnCount {
+                            centeredColumns[j].withUnsafeBufferPointer { jBuf in
+                                guard let jBase = jBuf.baseAddress else { return }
+                                var dot = 0.0
+                                vDSP_dotprD(iBase, 1, jBase, 1, &dot, len)
+                                let cov = dot * invDenom
+                                covMatrix[i * columnCount + j] = cov
+                                covMatrix[j * columnCount + i] = cov
+                            }
+                        }
+                    }
+                }
+
+                if !correlation {
+                    for i in 0..<columnCount {
+                        for j in 0..<columnCount {
+                            let v = covMatrix[i * columnCount + j]
+                            matrix[i][j] = v.isFinite ? v : nil
+                        }
+                    }
+                } else {
+                    let diagStds = (0..<columnCount).map { i -> Double in
+                        let v = covMatrix[i * columnCount + i]
+                        return v > 0 ? v.squareRoot() : 0
+                    }
+                    for i in 0..<columnCount {
+                        for j in 0..<columnCount {
+                            let denom = diagStds[i] * diagStds[j]
+                            guard denom > 0 else {
+                                matrix[i][j] = nil
+                                continue
+                            }
+                            if i == j {
+                                matrix[i][j] = 1.0
+                            } else {
+                                let corr = covMatrix[i * columnCount + j] / denom
+                                matrix[i][j] = corr.isFinite ? Swift.min(Swift.max(corr, -1.0), 1.0) : nil
+                            }
+                        }
+                    }
+                }
+            } else if rowCount >= 2 {
+                for i in 0..<columnCount {
+                    let lVals = buffers[i].floatColumn.values
+                    let lNulls = buffers[i].floatColumn.nullBitmap
+                    for j in i..<columnCount {
+                        let rVals = buffers[j].floatColumn.values
+                        let rNulls = buffers[j].floatColumn.nullBitmap
+                        var count = 0
+                        var sumX = 0.0
+                        var sumY = 0.0
+                        for row in 0..<rowCount where !lNulls[row] && !rNulls[row] {
+                            sumX += lVals[row]
+                            sumY += rVals[row]
+                            count += 1
+                        }
+                        guard count >= 2 else { continue }
+                        let mx = sumX / Double(count)
+                        let my = sumY / Double(count)
+                        var sxy = 0.0
+                        var sxx = 0.0
+                        var syy = 0.0
+                        for row in 0..<rowCount where !lNulls[row] && !rNulls[row] {
+                            let dx = lVals[row] - mx
+                            let dy = rVals[row] - my
+                            sxy += dx * dy
+                            if correlation {
+                                sxx += dx * dx
+                                syy += dy * dy
+                            }
+                        }
+                        let val: Double?
+                        if correlation {
+                            let denom = (sxx * syy).squareRoot()
+                            val = denom > 0 ? Swift.min(Swift.max(sxy / denom, -1.0), 1.0) : nil
+                        } else {
+                            val = sxy / Double(count - 1)
+                        }
+                        matrix[i][j] = val
+                        matrix[j][i] = val
+                    }
+                }
+            }
+
             return try DataFrame(columns: numericColumns.indices.map { j in
                 (
                     name: numericColumns[j].name,
-                    values: (0..<numericColumns.count).map { i in
+                    values: (0..<columnCount).map { i in
                         matrix[i][j].map(DataValue.number) ?? .missing
                     }
                 )
             })
         }
+
         return try pairwise { x, y in
             guard x.count > 1 else { return nil }
             let mx = x.reduce(0, +) / Double(x.count), my = y.reduce(0, +) / Double(y.count)
             let sxy = zip(x, y).reduce(0) { $0 + ($1.0 - mx) * ($1.1 - my) }
+            if !correlation {
+                return sxy / Double(x.count - 1)
+            }
             let sxx = x.reduce(0) { $0 + ($1 - mx) * ($1 - mx) }
             let syy = y.reduce(0) { $0 + ($1 - my) * ($1 - my) }
             let denominator = (sxx * syy).squareRoot()

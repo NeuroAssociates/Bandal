@@ -35,6 +35,79 @@ public struct RowPredicate: Sendable {
         return col
     }
 
+    private static func numericMask(
+        buffer: NumericBuffer,
+        predicate: (Double) -> Bool
+    ) -> BitSet {
+        let n = buffer.count
+        if n == 0 { return BitSet() }
+        let wordCount = (n + 63) >> 6
+        let hasNulls = buffer.hasMissing
+        let nullWords = buffer.floatColumn.nullBitmap.words
+        var anyTrue = false
+        let words = ContiguousArray<UInt64>(unsafeUninitializedCapacity: wordCount) { outBuf, initCount in
+            buffer.floatColumn.values.withUnsafeBufferPointer { valBuf in
+                guard let valBase = valBuf.baseAddress, let outBase = outBuf.baseAddress else { return }
+                let fullWords = n >> 6
+                if !hasNulls {
+                    for w in 0..<fullWords {
+                        let baseIdx = w &<< 6
+                        var word: UInt64 = 0
+                        for bit in 0..<64 {
+                            if predicate(valBase[baseIdx + bit]) {
+                                word |= (1 &<< UInt64(bit))
+                            }
+                        }
+                        if word != 0 { anyTrue = true }
+                        outBase[w] = word
+                    }
+                    let rem = n & 63
+                    if rem > 0 {
+                        let baseIdx = fullWords &<< 6
+                        var word: UInt64 = 0
+                        for bit in 0..<rem {
+                            if predicate(valBase[baseIdx + bit]) {
+                                word |= (1 &<< UInt64(bit))
+                            }
+                        }
+                        if word != 0 { anyTrue = true }
+                        outBase[fullWords] = word
+                    }
+                } else {
+                    for w in 0..<fullWords {
+                        let baseIdx = w &<< 6
+                        let nWord = nullWords[w]
+                        var word: UInt64 = 0
+                        for bit in 0..<64 {
+                            let bitMask = (1 as UInt64) &<< UInt64(bit)
+                            if (nWord & bitMask) == 0 && predicate(valBase[baseIdx + bit]) {
+                                word |= bitMask
+                            }
+                        }
+                        if word != 0 { anyTrue = true }
+                        outBase[w] = word
+                    }
+                    let rem = n & 63
+                    if rem > 0 {
+                        let baseIdx = fullWords &<< 6
+                        let nWord = nullWords[fullWords]
+                        var word: UInt64 = 0
+                        for bit in 0..<rem {
+                            let bitMask = (1 as UInt64) &<< UInt64(bit)
+                            if (nWord & bitMask) == 0 && predicate(valBase[baseIdx + bit]) {
+                                word |= bitMask
+                            }
+                        }
+                        if word != 0 { anyTrue = true }
+                        outBase[fullWords] = word
+                    }
+                }
+            }
+            initCount = wordCount
+        }
+        return BitSet(words: words, count: n, mayHaveTrueBits: anyTrue)
+    }
+
     /// Matches rows where `column` equals `value`.
     public static func column(_ name: String, equals value: DataValue) -> RowPredicate {
         RowPredicate(
@@ -43,18 +116,13 @@ public struct RowPredicate: Sendable {
             },
             fastMask: { df in
                 let col = try requireColumn(in: df, name: name)
-                var mask = BitSet(count: df.rowCount)
                 if value == .missing {
                     return col.storage.nullBitmap
                 }
-                if let floatCol = col.storage as? Float64Column, case .number(let target) = value {
-                    let vals = floatCol.values
-                    let nulls = floatCol.nullBitmap
-                    for i in 0..<vals.count where !nulls[i] && vals[i] == target {
-                        mask[i] = true
-                    }
-                    return mask
+                if let buf = col.numericBuffer, case .number(let target) = value {
+                    return numericMask(buffer: buf) { $0 == target }
                 }
+                var mask = BitSet(count: df.rowCount)
                 if let strCol = col.storage as? StringColumn, case .string(let target) = value {
                     let vals = strCol.stringData
                     let nulls = strCol.nullBitmap
@@ -114,15 +182,10 @@ public struct RowPredicate: Sendable {
             },
             fastMask: { df in
                 let col = try requireColumn(in: df, name: name)
-                var mask = BitSet(count: df.rowCount)
                 if let buf = col.numericBuffer {
-                    let vals = buf.floatColumn.values
-                    let nulls = buf.floatColumn.nullBitmap
-                    for i in 0..<vals.count where !nulls[i] && vals[i] > threshold {
-                        mask[i] = true
-                    }
-                    return mask
+                    return numericMask(buffer: buf) { $0 > threshold }
                 }
+                var mask = BitSet(count: df.rowCount)
                 for i in 0..<df.rowCount {
                     if case .number(let n) = col.storage.value(at: i), n > threshold {
                         mask[i] = true
@@ -142,15 +205,10 @@ public struct RowPredicate: Sendable {
             },
             fastMask: { df in
                 let col = try requireColumn(in: df, name: name)
-                var mask = BitSet(count: df.rowCount)
                 if let buf = col.numericBuffer {
-                    let vals = buf.floatColumn.values
-                    let nulls = buf.floatColumn.nullBitmap
-                    for i in 0..<vals.count where !nulls[i] && vals[i] >= threshold {
-                        mask[i] = true
-                    }
-                    return mask
+                    return numericMask(buffer: buf) { $0 >= threshold }
                 }
+                var mask = BitSet(count: df.rowCount)
                 for i in 0..<df.rowCount {
                     if case .number(let n) = col.storage.value(at: i), n >= threshold {
                         mask[i] = true
@@ -170,15 +228,10 @@ public struct RowPredicate: Sendable {
             },
             fastMask: { df in
                 let col = try requireColumn(in: df, name: name)
-                var mask = BitSet(count: df.rowCount)
                 if let buf = col.numericBuffer {
-                    let vals = buf.floatColumn.values
-                    let nulls = buf.floatColumn.nullBitmap
-                    for i in 0..<vals.count where !nulls[i] && vals[i] < threshold {
-                        mask[i] = true
-                    }
-                    return mask
+                    return numericMask(buffer: buf) { $0 < threshold }
                 }
+                var mask = BitSet(count: df.rowCount)
                 for i in 0..<df.rowCount {
                     if case .number(let n) = col.storage.value(at: i), n < threshold {
                         mask[i] = true
@@ -198,15 +251,10 @@ public struct RowPredicate: Sendable {
             },
             fastMask: { df in
                 let col = try requireColumn(in: df, name: name)
-                var mask = BitSet(count: df.rowCount)
                 if let buf = col.numericBuffer {
-                    let vals = buf.floatColumn.values
-                    let nulls = buf.floatColumn.nullBitmap
-                    for i in 0..<vals.count where !nulls[i] && vals[i] <= threshold {
-                        mask[i] = true
-                    }
-                    return mask
+                    return numericMask(buffer: buf) { $0 <= threshold }
                 }
+                var mask = BitSet(count: df.rowCount)
                 for i in 0..<df.rowCount {
                     if case .number(let n) = col.storage.value(at: i), n <= threshold {
                         mask[i] = true
@@ -231,21 +279,14 @@ public struct RowPredicate: Sendable {
             },
             fastMask: { df in
                 let col = try requireColumn(in: df, name: name)
-                var mask = BitSet(count: df.rowCount)
                 if let buf = col.numericBuffer {
-                    let vals = buf.floatColumn.values
-                    let nulls = buf.floatColumn.nullBitmap
                     if inclusive {
-                        for i in 0..<vals.count where !nulls[i] && vals[i] >= lower && vals[i] <= upper {
-                            mask[i] = true
-                        }
+                        return numericMask(buffer: buf) { $0 >= lower && $0 <= upper }
                     } else {
-                        for i in 0..<vals.count where !nulls[i] && vals[i] > lower && vals[i] < upper {
-                            mask[i] = true
-                        }
+                        return numericMask(buffer: buf) { $0 > lower && $0 < upper }
                     }
-                    return mask
                 }
+                var mask = BitSet(count: df.rowCount)
                 for i in 0..<df.rowCount {
                     if case .number(let n) = col.storage.value(at: i) {
                         if inclusive ? (n >= lower && n <= upper) : (n > lower && n < upper) {
