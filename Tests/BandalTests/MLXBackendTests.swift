@@ -124,6 +124,51 @@ private func expectClose(_ lhs: Double?, _ rhs: Double?, tolerance: Double = 1e-
     }
 }
 
+@Test func mlxStridedRollingAndUnaryMathAndGpuFloat32PolicyAgree() throws {
+    let n = 4_500
+    let denseValues: [Double] = (0..<n).map { Double(($0 * 19) % 73) * 0.1 + 1.0 }
+    let df = try DataFrame(columns: [(name: "x", values: denseValues)])
+
+    for fn in [AggregateFunction.sum, .mean, .min, .max, .variance, .standardDeviation] {
+        let rNative = try BandalRuntime.withExecutionPolicy(.native) { try df.rolling("x", window: 8, using: fn) }
+        let rMLX = try BandalRuntime.withExecutionPolicy(.cpu) { try df.rolling("x", window: 8, using: fn) }
+        let rGPU32 = try BandalRuntime.withExecutionPolicy(.gpuFloat32) { try df.rolling("x", window: 8, using: fn) }
+        let col = "x_\(fn.name)_rolling_8"
+        for (a, b) in zip(try rNative.values(in: col), try rMLX.values(in: col)) {
+            switch (a, b) {
+            case (.missing, .missing): continue
+            case (.number(let x), .number(let y)): expectClose(x, y, tolerance: 1e-8)
+            default: Issue.record("mismatch in \(col): \(a) vs \(b)")
+            }
+        }
+        for (a, b) in zip(try rNative.values(in: col), try rGPU32.values(in: col)) {
+            switch (a, b) {
+            case (.missing, .missing): continue
+            case (.number(let x), .number(let y)): expectClose(x, y, tolerance: 1e-3)
+            default: Issue.record("mismatch in \(col): \(a) vs \(b)")
+            }
+        }
+    }
+
+    for mathFn in [UnaryMathFunction.sqrt, .log, .log1p, .sin, .cos, .sign] {
+        let mNative = try BandalRuntime.withExecutionPolicy(.native) {
+            try df.applying("x", function: mathFn, as: "m")
+        }
+        let mCPU = try BandalRuntime.withExecutionPolicy(.cpu) {
+            try df.applying("x", function: mathFn, as: "m")
+        }
+        let mGPU32 = try BandalRuntime.withExecutionPolicy(.gpuFloat32) {
+            try df.applying("x", function: mathFn, as: "m")
+        }
+        for (a, b) in zip(try mNative.column("m"), try mCPU.column("m")) {
+            expectClose(a, b, tolerance: 1e-6)
+        }
+        for (a, b) in zip(try mNative.column("m"), try mGPU32.column("m")) {
+            expectClose(a, b, tolerance: 1e-4)
+        }
+    }
+}
+
 @Test func mlxAndNativeElementwiseAndMatrixOperationsAgree() throws {
     let n = 4_500
     let aValues: [Double] = (0..<n).map { Double(($0 * 17) % 101) - 50.0 }

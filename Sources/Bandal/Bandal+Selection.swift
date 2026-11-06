@@ -3,9 +3,22 @@ import Foundation
 /// A composable, type-safe row predicate used with ``DataFrame/query(_:)-5r82k``.
 public struct RowPredicate: Sendable {
     let evaluate: @Sendable ([String: DataValue]) throws -> Bool
+    let fastMask: (@Sendable (DataFrame) throws -> BitSet?)?
 
+    /// Creates a predicate from a closure evaluated against each row.
+    ///
+    /// - Parameter evaluate: A closure receiving the row as a dictionary of column name to value, returning `true` to keep the row. Errors it throws propagate to the caller.
     public init(_ evaluate: @escaping @Sendable ([String: DataValue]) throws -> Bool) {
         self.evaluate = evaluate
+        self.fastMask = nil
+    }
+
+    init(
+        evaluate: @escaping @Sendable ([String: DataValue]) throws -> Bool,
+        fastMask: (@Sendable (DataFrame) throws -> BitSet?)?
+    ) {
+        self.evaluate = evaluate
+        self.fastMask = fastMask
     }
 
     private static func requireValue(in row: [String: DataValue], column: String) throws -> DataValue {
@@ -15,50 +28,193 @@ public struct RowPredicate: Sendable {
         return value
     }
 
+    private static func requireColumn(in df: DataFrame, name: String) throws -> DataColumn {
+        guard let col = df.columns.first(where: { $0.name == name }) else {
+            throw DataFrameError.columnNotFound(name)
+        }
+        return col
+    }
+
     /// Matches rows where `column` equals `value`.
     public static func column(_ name: String, equals value: DataValue) -> RowPredicate {
-        RowPredicate { row in
-            try requireValue(in: row, column: name) == value
-        }
+        RowPredicate(
+            evaluate: { row in
+                try requireValue(in: row, column: name) == value
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                if value == .missing {
+                    return col.storage.nullBitmap
+                }
+                if let floatCol = col.storage as? Float64Column, case .number(let target) = value {
+                    let vals = floatCol.values
+                    let nulls = floatCol.nullBitmap
+                    for i in 0..<vals.count where !nulls[i] && vals[i] == target {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                if let strCol = col.storage as? StringColumn, case .string(let target) = value {
+                    let vals = strCol.stringData
+                    let nulls = strCol.nullBitmap
+                    for i in 0..<vals.count where !nulls[i] && vals[i] == target {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                if let catCol = col.storage as? CategoricalColumn, case .string(let target) = value {
+                    guard let code = catCol.dictionary.firstIndex(of: target).map(UInt32.init) else {
+                        return mask
+                    }
+                    let codes = catCol.codes
+                    let nulls = catCol.nullBitmap
+                    for i in 0..<codes.count where !nulls[i] && codes[i] == code {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                if let boolCol = col.storage as? BooleanColumn, case .boolean(let target) = value {
+                    let bits = boolCol.bitmap
+                    let nulls = boolCol.nullBitmap
+                    for i in 0..<boolCol.count where !nulls[i] && bits[i] == target {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                for i in 0..<df.rowCount where col.storage.value(at: i) == value {
+                    mask[i] = true
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where `column` does not equal `value`.
     public static func column(_ name: String, notEquals value: DataValue) -> RowPredicate {
-        RowPredicate { row in
-            try requireValue(in: row, column: name) != value
-        }
+        RowPredicate(
+            evaluate: { row in
+                try requireValue(in: row, column: name) != value
+            },
+            fastMask: { df in
+                if let eqMask = try RowPredicate.column(name, equals: value).fastMask?(df) {
+                    return eqMask.inverted()
+                }
+                return nil
+            }
+        )
     }
 
     /// Matches rows where numeric `column` is strictly greater than `threshold`.
     public static func column(_ name: String, greaterThan threshold: Double) -> RowPredicate {
-        RowPredicate { row in
-            guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
-            return n > threshold
-        }
+        RowPredicate(
+            evaluate: { row in
+                guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
+                return n > threshold
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                if let buf = col.numericBuffer {
+                    let vals = buf.floatColumn.values
+                    let nulls = buf.floatColumn.nullBitmap
+                    for i in 0..<vals.count where !nulls[i] && vals[i] > threshold {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                for i in 0..<df.rowCount {
+                    if case .number(let n) = col.storage.value(at: i), n > threshold {
+                        mask[i] = true
+                    }
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where numeric `column` is greater than or equal to `threshold`.
     public static func column(_ name: String, greaterThanOrEqual threshold: Double) -> RowPredicate {
-        RowPredicate { row in
-            guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
-            return n >= threshold
-        }
+        RowPredicate(
+            evaluate: { row in
+                guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
+                return n >= threshold
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                if let buf = col.numericBuffer {
+                    let vals = buf.floatColumn.values
+                    let nulls = buf.floatColumn.nullBitmap
+                    for i in 0..<vals.count where !nulls[i] && vals[i] >= threshold {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                for i in 0..<df.rowCount {
+                    if case .number(let n) = col.storage.value(at: i), n >= threshold {
+                        mask[i] = true
+                    }
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where numeric `column` is strictly less than `threshold`.
     public static func column(_ name: String, lessThan threshold: Double) -> RowPredicate {
-        RowPredicate { row in
-            guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
-            return n < threshold
-        }
+        RowPredicate(
+            evaluate: { row in
+                guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
+                return n < threshold
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                if let buf = col.numericBuffer {
+                    let vals = buf.floatColumn.values
+                    let nulls = buf.floatColumn.nullBitmap
+                    for i in 0..<vals.count where !nulls[i] && vals[i] < threshold {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                for i in 0..<df.rowCount {
+                    if case .number(let n) = col.storage.value(at: i), n < threshold {
+                        mask[i] = true
+                    }
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where numeric `column` is less than or equal to `threshold`.
     public static func column(_ name: String, lessThanOrEqual threshold: Double) -> RowPredicate {
-        RowPredicate { row in
-            guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
-            return n <= threshold
-        }
+        RowPredicate(
+            evaluate: { row in
+                guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
+                return n <= threshold
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                if let buf = col.numericBuffer {
+                    let vals = buf.floatColumn.values
+                    let nulls = buf.floatColumn.nullBitmap
+                    for i in 0..<vals.count where !nulls[i] && vals[i] <= threshold {
+                        mask[i] = true
+                    }
+                    return mask
+                }
+                for i in 0..<df.rowCount {
+                    if case .number(let n) = col.storage.value(at: i), n <= threshold {
+                        mask[i] = true
+                    }
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where numeric `column` lies in `lower...upper` (or `(lower, upper)` when `inclusive` is `false`).
@@ -68,17 +224,55 @@ public struct RowPredicate: Sendable {
         and upper: Double,
         inclusive: Bool = true
     ) -> RowPredicate {
-        RowPredicate { row in
-            guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
-            return inclusive ? (n >= lower && n <= upper) : (n > lower && n < upper)
-        }
+        RowPredicate(
+            evaluate: { row in
+                guard case .number(let n) = try requireValue(in: row, column: name) else { return false }
+                return inclusive ? (n >= lower && n <= upper) : (n > lower && n < upper)
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                if let buf = col.numericBuffer {
+                    let vals = buf.floatColumn.values
+                    let nulls = buf.floatColumn.nullBitmap
+                    if inclusive {
+                        for i in 0..<vals.count where !nulls[i] && vals[i] >= lower && vals[i] <= upper {
+                            mask[i] = true
+                        }
+                    } else {
+                        for i in 0..<vals.count where !nulls[i] && vals[i] > lower && vals[i] < upper {
+                            mask[i] = true
+                        }
+                    }
+                    return mask
+                }
+                for i in 0..<df.rowCount {
+                    if case .number(let n) = col.storage.value(at: i) {
+                        if inclusive ? (n >= lower && n <= upper) : (n > lower && n < upper) {
+                            mask[i] = true
+                        }
+                    }
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where `column` belongs to `candidates`.
     public static func column(_ name: String, in candidates: Set<DataValue>) -> RowPredicate {
-        RowPredicate { row in
-            candidates.contains(try requireValue(in: row, column: name))
-        }
+        RowPredicate(
+            evaluate: { row in
+                candidates.contains(try requireValue(in: row, column: name))
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                for i in 0..<df.rowCount where candidates.contains(col.storage.value(at: i)) {
+                    mask[i] = true
+                }
+                return mask
+            }
+        )
     }
 
     /// Matches rows where string `column` contains `substring`.
@@ -87,63 +281,118 @@ public struct RowPredicate: Sendable {
         contains substring: String,
         caseSensitive: Bool = true
     ) -> RowPredicate {
-        RowPredicate { row in
-            guard case .string(let s) = try requireValue(in: row, column: name) else { return false }
-            if caseSensitive {
-                return s.contains(substring)
+        RowPredicate(
+            evaluate: { row in
+                guard case .string(let s) = try requireValue(in: row, column: name) else { return false }
+                if caseSensitive {
+                    return s.contains(substring)
+                }
+                return s.range(of: substring, options: .caseInsensitive) != nil
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                var mask = BitSet(count: df.rowCount)
+                for i in 0..<df.rowCount {
+                    if case .string(let s) = col.storage.value(at: i) {
+                        let matches = caseSensitive
+                            ? s.contains(substring)
+                            : (s.range(of: substring, options: .caseInsensitive) != nil)
+                        if matches {
+                            mask[i] = true
+                        }
+                    }
+                }
+                return mask
             }
-            return s.range(of: substring, options: .caseInsensitive) != nil
-        }
+        )
     }
 
     /// Matches rows where `column` is `.missing`.
     public static func isMissing(_ name: String) -> RowPredicate {
-        RowPredicate { row in
-            try requireValue(in: row, column: name) == .missing
-        }
+        RowPredicate(
+            evaluate: { row in
+                try requireValue(in: row, column: name) == .missing
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                return col.storage.nullBitmap
+            }
+        )
     }
 
     /// Matches rows where `column` is not `.missing`.
     public static func notMissing(_ name: String) -> RowPredicate {
-        RowPredicate { row in
-            try requireValue(in: row, column: name) != .missing
-        }
+        RowPredicate(
+            evaluate: { row in
+                try requireValue(in: row, column: name) != .missing
+            },
+            fastMask: { df in
+                let col = try requireColumn(in: df, name: name)
+                return col.storage.nullBitmap.inverted()
+            }
+        )
     }
 
     /// Logical conjunction (`AND`) of two predicates.
     public func and(_ other: RowPredicate) -> RowPredicate {
         let lhs = evaluate
         let rhs = other.evaluate
-        return RowPredicate { row in
-            try lhs(row) && rhs(row)
-        }
+        let lhsFast = fastMask
+        let rhsFast = other.fastMask
+        return RowPredicate(
+            evaluate: { row in
+                try lhs(row) && rhs(row)
+            },
+            fastMask: { df in
+                guard let m1 = try lhsFast?(df), let m2 = try rhsFast?(df) else { return nil }
+                return m1.bitwiseAnd(m2)
+            }
+        )
     }
 
     /// Logical disjunction (`OR`) of two predicates.
     public func or(_ other: RowPredicate) -> RowPredicate {
         let lhs = evaluate
         let rhs = other.evaluate
-        return RowPredicate { row in
-            try lhs(row) || rhs(row)
-        }
+        let lhsFast = fastMask
+        let rhsFast = other.fastMask
+        return RowPredicate(
+            evaluate: { row in
+                try lhs(row) || rhs(row)
+            },
+            fastMask: { df in
+                guard let m1 = try lhsFast?(df), let m2 = try rhsFast?(df) else { return nil }
+                return m1.bitwiseOr(m2)
+            }
+        )
     }
 
     /// Logical negation (`NOT`) of a predicate.
     public var negated: RowPredicate {
         let inner = evaluate
-        return RowPredicate { row in
-            try !inner(row)
-        }
+        let innerFast = fastMask
+        return RowPredicate(
+            evaluate: { row in
+                try !inner(row)
+            },
+            fastMask: { df in
+                guard let m = try innerFast?(df) else { return nil }
+                return m.inverted()
+            }
+        )
     }
 
+    /// Returns a predicate that matches rows satisfying both operands.
     public static func && (lhs: RowPredicate, rhs: RowPredicate) -> RowPredicate {
         lhs.and(rhs)
     }
 
+    /// Returns a predicate that matches rows satisfying either operand.
     public static func || (lhs: RowPredicate, rhs: RowPredicate) -> RowPredicate {
         lhs.or(rhs)
     }
 
+    /// Returns a predicate that matches rows not satisfying the operand.
     public static prefix func ! (predicate: RowPredicate) -> RowPredicate {
         predicate.negated
     }
@@ -159,19 +408,14 @@ public enum DateComponent: String, Hashable, Sendable, Codable, CaseIterable, Cu
     case minute
     case second
 
+    /// The lowercase name of the component.
     public var description: String { rawValue }
 }
 
 extension DataFrame {
     /// Returns a new data frame containing the requested columns in the given order.
     public func select(_ names: String...) throws -> DataFrame {
-        guard !names.isEmpty else {
-            throw DataFrameError.emptyColumns
-        }
-        let selected = try names.map { name in
-            (name: name, values: try values(in: name))
-        }
-        return try DataFrame(columns: selected)
+        try select(columns: names)
     }
 
     /// Returns a new data frame containing the requested columns in the given order.
@@ -179,10 +423,13 @@ extension DataFrame {
         guard !names.isEmpty else {
             throw DataFrameError.emptyColumns
         }
-        let selected = try names.map { name in
-            (name: name, values: try values(in: name))
+        let selected = try names.map { name -> DataColumn in
+            guard let col = columns.first(where: { $0.name == name }) else {
+                throw DataFrameError.columnNotFound(name)
+            }
+            return col
         }
-        return try DataFrame(columns: selected)
+        return try DataFrame(dataColumns: selected)
     }
 
     /// Returns the row at `index`, or `nil` when `index` is out of bounds.
@@ -191,7 +438,7 @@ extension DataFrame {
         var map: [String: DataValue] = [:]
         map.reserveCapacity(columns.count)
         for column in columns {
-            map[column.name] = column.values[index]
+            map[column.name] = column.storage.value(at: index)
         }
         return DataRow(index: index, columnOrder: columnNames, values: map)
     }
@@ -220,7 +467,7 @@ extension DataFrame {
         else {
             return nil
         }
-        return col.values[row]
+        return col.storage.value(at: row)
     }
 
     /// Exports the frame as a dictionary mapping each column name to its `[DataValue]` array.
@@ -243,24 +490,27 @@ extension DataFrame {
     public func filterRows(
         _ predicate: ([String: DataValue]) throws -> Bool
     ) throws -> DataFrame {
-        var selectedRows: [Int] = []
+        var mask = BitSet(count: rowCount)
         var row: [String: DataValue] = [:]
         row.reserveCapacity(columns.count)
         for rowIndex in 0..<rowCount {
             row.removeAll(keepingCapacity: true)
             for column in columns {
-                row[column.name] = column.values[rowIndex]
+                row[column.name] = column.storage.value(at: rowIndex)
             }
             if try predicate(row) {
-                selectedRows.append(rowIndex)
+                mask[rowIndex] = true
             }
         }
-        return try rows(at: selectedRows)
+        return try rows(matching: mask)
     }
 
     /// Filters rows using a composable ``RowPredicate``.
     public func query(_ predicate: RowPredicate) throws -> DataFrame {
-        try filterRows(predicate.evaluate)
+        if let mask = try predicate.fastMask?(self) {
+            return try rows(matching: mask)
+        }
+        return try filterRows(predicate.evaluate)
     }
 
     /// Filters rows using a concise query expression such as `"score >= 80 && active == true"`.
@@ -273,8 +523,33 @@ extension DataFrame {
         return try query(predicate)
     }
 
+    /// Internal helper to add or replace a column directly from an `AnyColumn` storage.
+    func withColumn(storage: any AnyColumn) throws -> DataFrame {
+        guard !storage.name.isEmpty else {
+            throw DataFrameError.emptyColumnName
+        }
+        guard storage.count == rowCount else {
+            throw DataFrameError.unequalColumnLengths(
+                column: storage.name,
+                expected: rowCount,
+                actual: storage.count
+            )
+        }
+        let newCol = DataColumn(storage: storage)
+        var updated = columns
+        if let index = updated.firstIndex(where: { $0.name == storage.name }) {
+            updated[index] = newCol
+        } else {
+            updated.append(newCol)
+        }
+        return try DataFrame(dataColumns: updated)
+    }
+
     /// Returns a copy with a new or replaced column.
     public func withColumn(name: String, values: [DataValue]) throws -> DataFrame {
+        guard !name.isEmpty else {
+            throw DataFrameError.emptyColumnName
+        }
         guard values.count == rowCount else {
             throw DataFrameError.unequalColumnLengths(
                 column: name,
@@ -282,13 +557,19 @@ extension DataFrame {
                 actual: values.count
             )
         }
-        var updated = columns.map { (name: $0.name, values: $0.values) }
-        if let index = updated.firstIndex(where: { $0.name == name }) {
-            updated[index] = (name: name, values: values)
-        } else {
-            updated.append((name: name, values: values))
+        for (row, value) in values.enumerated() {
+            if case .number(let number) = value, !number.isFinite {
+                throw DataFrameError.nonFiniteValue(column: name, row: row)
+            }
         }
-        return try DataFrame(columns: updated)
+        let newCol = DataColumn(name: name, values: values)
+        var updated = columns
+        if let index = updated.firstIndex(where: { $0.name == name }) {
+            updated[index] = newCol
+        } else {
+            updated.append(newCol)
+        }
+        return try DataFrame(dataColumns: updated)
     }
 
     /// Returns a copy with a new or replaced column computed row-by-row (similar to `df.assign()`).
@@ -311,12 +592,13 @@ extension DataFrame {
         for name in names.keys where !columnNames.contains(name) {
             throw DataFrameError.columnNotFound(name)
         }
-        return try DataFrame(columns: columns.map { column in
-            (
-                name: names[column.name] ?? column.name,
-                values: column.values
-            )
-        })
+        let updated = columns.map { column in
+            if let newName = names[column.name] {
+                return column.renamed(to: newName)
+            }
+            return column
+        }
+        return try DataFrame(dataColumns: updated)
     }
 
     /// Converts a column to the requested concrete type without mutating the frame.
@@ -459,9 +741,14 @@ extension DataFrame {
         keep: DuplicateKeep = .first
     ) throws -> [Bool] {
         let names = try validatedColumnNames(selectedColumns)
-        let selected = try names.map { try values(in: $0) }
+        let selectedCols = try names.map { name -> any AnyColumn in
+            guard let col = columns.first(where: { $0.name == name }) else {
+                throw DataFrameError.columnNotFound(name)
+            }
+            return col.storage
+        }
         let rowKeys = (0..<rowCount).map { row in
-            selected.map { $0[row] }
+            selectedCols.map { $0.value(at: row) }
         }
         var duplicateMask = Array(repeating: false, count: rowCount)
 
@@ -497,8 +784,11 @@ extension DataFrame {
         keep: DuplicateKeep = .first
     ) throws -> DataFrame {
         let duplicateMask = try duplicatedRows(in: selectedColumns, keep: keep)
-        let uniqueRows = duplicateMask.indices.filter { !duplicateMask[$0] }
-        return try rows(at: uniqueRows)
+        var keepBits = BitSet(count: rowCount)
+        for i in 0..<rowCount where !duplicateMask[i] {
+            keepBits[i] = true
+        }
+        return try rows(matching: keepBits)
     }
 
     /// Concatenates frames vertically, requiring identical column names and order.

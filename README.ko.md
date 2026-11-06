@@ -121,7 +121,10 @@ print(desc)
 | `df.merge(other, left_on=..., right_on=..., how=...)` | `try df.join(other, leftOn: [...], rightOn: [...], kind: ...)` |
 | `df.melt(...)` / `df.pivot_table(...)` | `try df.melt(...)` / `try df.pivotTable(...)` |
 | `df.explode("col")` / `df.T` | `try df.exploded("col")` / `try df.transposed()` |
-| `df.rolling(w).mean()` / `df.rolling("60s", on=...).mean()` / `df.expanding().sum()` | `try df.rolling("col", window: w, using: .mean)` / `try df.rolling("col", on: "ts", interval: 60, using: .mean)` / `try df.expanding("col", using: .sum)` |
+| `df.rolling(w).mean()` / `df.rolling("60s", on=...).mean()` / `df.expanding().sum()` | `try df.rolling("col", window: w, minPeriods: 1, using: .mean)` / `try df.rolling("col", on: "ts", interval: 60, using: .mean)` / `try df.expanding("col", using: .sum)` |
+| `df[(df["x"] >= 10) & (df["y"] == "a")]` / `s.where(cond, other)` | `df[(try df.series("x") >= 10.0) && try df.series("y").equals("a")]` / `try s.where(mask, otherwise: other)` |
+| `np.log1p(df["x"])` / `df["x"] ** 2` / `pd.cut` / `pd.qcut` / `s.interpolate()` / `s.ewm(alpha=...).mean()` | `try df.applying("x", function: .log1p)` / `try df.power("x", exponent: 2)` / `binned` / `quantileBinned` / `interpolated` / `exponentiallyWeighted` |
+| `df.pivot(...)` / `pd.crosstab(...)` / `pd.get_dummies(...)` / `pd.merge_asof(...)` / `df.resample(...)` | `try df.pivoted(...)` / `try df.crossTabulated(...)` / `try df.oneHotEncoded(...)` / `try df.joinAsOf(...)` / `try df.resample(...)` |
 | `df.to_markdown()` | `df.toMarkdown()` |
 
 ---

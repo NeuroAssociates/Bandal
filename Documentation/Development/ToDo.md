@@ -1,5 +1,7 @@
 # Bandal improvement plan
 
+> Archive: every item below is complete. This file records development history; `AGENTS.md` (repository root) holds the current project requirements.
+
 This roadmap uses pandas as a capability reference, not as a promise of API
 compatibility. Priorities favor the workflows already demonstrated by Bandal
 and keep the Swift API explicit and type-safe.
@@ -406,19 +408,6 @@ Plan:
 
 ---
 
-## Implementation status (latest)
-
-All items in `ToDo.md` and all 9 verification checkpoints in `CheckPoints.md` are complete:
-
-- [x] **R1 MLX backend**: `Bandal+MLXBackend.swift` (`MLXBackend`, `NumericEngine`, `BandalRuntime`, `ExecutionPolicy`, `MLXVector`); `float64` CPU-stream reductions and `float32` GPU-stream support; `MLX.matmul` covariance/correlation; element-wise unary/binary operations; automatic native fallback; `Scripts/test-with-mlx.sh`.
-- [x] **R2 pandas coverage**: `DataFrame`, `Series`, `DataRow`, CSV & JSON I/O, `RowPredicate` & string `query`, `withColumn(name:computing:)`, `DateComponent` & string operations, `exploded`, `transposed`, time-based `rolling`, `toMarkdown`, `RenderOptions`, multi-key joins with suffixes, extended aggregations, and full series/column math.
-- [x] **R3 Swift API Design Guidelines**: Value semantics, `Sendable`/`Equatable`/`Hashable`/`Codable`/`CaseIterable`, subscripts (`df[col]`, `df[row:]`, `df[rows:]`, `df[col, row]`), literal conformances on `DataValue`, and clear Swift naming.
-- [x] **R4 Structured printable results**: `DataFrame`, `Series`, `DataRow`, `DataFrameDescription`, `DataFrameStatistics`, `ColumnStatistics`, `NonNumericSummary`, `DataFrameSummary`, `DataFrameInfo`, `MissingCounts`, `UniqueCounts`, `ColumnTypes`, `MLXVector`, `GroupedDataFrame`, `Aggregation`, `CSVReadOptions`, `RenderOptions`.
-- [x] **R5 & R7 Bilingual documentation**: `Documentation/API.md`, `Documentation/API.ko.md`, `README.md`, `README.ko.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, and `LICENSE`.
-- [x] **Phase 6 High-Performance Columnar Engine**: Typed columnar storage (`AnyColumn`, `Float64Column`, `Int64Column`, `StringColumn`, `CategoricalColumn`, `BooleanColumn`, `DateColumn`, `AnyValueColumn`), `BitSet` null tracking, fast-path filter & mask slicing, streamlined zero-copy CSV parser, categorical encoding, primitive fast sort, vectorized GroupBy scatter aggregation, and index-based joins with 100% test pass rate.
-
----
-
 # Phase 6 — High-Performance Columnar Engine (Apache Arrow / Polars model)
 
 Goal: Refactor Bandal's core architecture to achieve competitive execution speed compared to Python Pandas/Polars (targeting a 5x~10x speedup across 40,000+ row workloads). Eliminate cell-level `DataValue` boxing, eliminate per-row dictionary allocations in filtering/grouping, and enable true contiguous SIMD/MLX vectorization.
@@ -463,3 +452,62 @@ Goal: Refactor Bandal's core architecture to achieve competitive execution speed
 - [x] Step 5 (Left Join): **6.95ms** (3x speedup)
 - [x] Describe: **9.42ms**
 - [x] 100% test pass rate (all 63 tests passing)
+
+---
+
+# Phase 7 — Zero-Boxing Columnar ↔ MLX Pipeline & Full Pandas API Completion
+
+Goal: Eliminate all remaining `[DataValue]` boxing bottlenecks between `Columnar` storage and `MLX-Swift`, unlock full Metal GPU (`Float32`) and fused lazy graph execution in MLX, and complete advanced Pandas capabilities in idiomatic Swift per `AGENTS.md` (repository root).
+
+### 7.1 Step 1 — Zero-Boxing Columnar ↔ MLX Pipeline & O(1) Column Replacement
+- [x] **Unify `Float64Column` / `Int64Column` with `NumericBuffer`**:
+  - Eliminate redundant `Array(floatCol.values)` and `[Bool]` mask copies during `DataColumn.init(storage:)`.
+  - Bridge `Int64Column` seamlessly into numeric buffers and `Float64Column` views so integer columns also benefit from MLX acceleration.
+  - Replace `[Bool]` missing-value loops with word-level `BitSet` operations (`bitwiseOr`, `bitwiseAnd`, `inverted`).
+- [x] **Direct `Float64Column` ↔ `MLXArray` Kernels**:
+  - Refactor `NumericEngine` operations (`clip`, `round`, `abs`, `cumulative`, `difference`, `percentChange`, `binaryArithmetic`, `scalarArithmetic`, `unaryMath`) to accept and return `Float64Column` (`ContiguousArray<Double>` + `BitSet`) directly via `withUnsafeBufferPointer`, avoiding `[DataValue]` boxing/unboxing.
+- [x] **O(1) Unmodified Column Reuse on `DataFrame` Mutations**:
+  - Refactor `withColumn`, `replacingColumn`, `select`, `drop(columns:)`, and `renamedColumns` to construct `DataFrame(dataColumns:)` / `DataFrame(storageColumns:)` directly without materializing `[DataValue]` or re-running `AnyColumnFactory.make` on untouched columns.
+- [x] **Columnar-Backed `Series`**:
+  - Back `Series` with `any AnyColumn` storage (computing `values: [DataValue]` only when explicitly requested) so `df["col"]` and `Series` arithmetic/comparisons run with zero `[DataValue]` boxing.
+
+### 7.2 Step 2 — MLX Graph Fusion, Practical GPU (`Float32`) Acceleration & Vectorized Kernels
+- [x] **Single-Pass MLX Graph Fusion (`MLX.eval` Batching)**:
+  - Fuse `sum`, `variance`, `min`, `max`, and `sort` in `NumericEngine.moments(of:)` into a single `MLX.eval(...)` call instead of separate synchronous `.item()` / `.asArray()` round-trips.
+  - Batch prefix-sum and cumulative evaluations into a single `MLX.eval` call.
+- [x] **Practical Metal GPU (`Float32`) Execution Policy & Adaptive Thresholds**:
+  - Add `ExecutionPolicy.gpuFloat32` to execute general finite floating-point workloads in `Float32` on the Metal GPU stream while preserving `.gpu`'s lossless `isExactFloat32` check.
+- [x] **Vectorized Rolling Windows (`MLX.asStrided`), Columnar Query Masking, and Multi-Key GroupBy**:
+  - Accelerate `rolling` `.sum`, `.mean`, `.min`, `.max`, `.variance`, and `.standardDeviation` on non-null columns using `MLX.asStrided` 2D sliding window views and axis reductions.
+  - Add columnar `fastMask` evaluation to `RowPredicate` and `query(_: String)` so filtering operates directly on `Float64Column`, `StringColumn`, `CategoricalColumn`, `BooleanColumn`, and `BitSet` without per-row dictionary allocation.
+  - Extend dense `Int32` group ID hashing and `Float64Column` output to multi-key `groupBy`.
+- [x] **Direct CSV-to-Columnar Streaming Builder**:
+  - Parse CSV fields directly into typed columnar builders (`CSVColumnBuilder`) during streaming reads to eliminate intermediate `[[DataValue]]` allocation and rescanning for numeric columns.
+
+### 7.3 Step 3 — Complete Idiomatic Swift Pandas Capabilities & Structured Result Types
+- [x] **Vectorized `BooleanMask` & `Series` Comparison Operators**:
+  - Introduce `BooleanMask` (backed by `BitSet`, conforming to `CustomStringConvertible`, supporting `&&`, `||`, `!`).
+  - Add comparison operators (`<`, `<=`, `>`, `>=`, `equals(_:)`, `notEquals(_:)`) on `Series` returning `BooleanMask`.
+  - Add `df[mask]` subscript and `df.filtered(by: BooleanMask)` for fast vectorized boolean indexing.
+- [x] **Mathematical, Transcendental & Standardization Operations**:
+  - Add `UnaryMathFunction` (`.sqrt`, `.exp`, `.log`, `.log10`, `.log1p`, `.sin`, `.cos`, `.tan`, `.sign`), `applying(_: UnaryMathFunction)`, and `power(_ exponent: Double)` on `Series` and `DataFrame` (MLX-accelerated).
+  - Add `standardized(_ column:)` (Z-score) and `minMaxScaled(_ column:)`.
+- [x] **Binning, Interpolation, Conditional Replacement & Extrema Indexing**:
+  - Add `binned(_:edges:labels:rightClosed:includeLowest:as:)` (`pd.cut`) and `quantileBinned(_:quantiles:labels:as:)` (`pd.qcut`).
+  - Add `interpolated(_:)` for linear interpolation of missing numeric values (`df.interpolate`).
+  - Add `where(_ mask: BooleanMask, otherwise replacement: DataValue)` (`df.where` / `np.where`).
+  - Add `indexOfMax()` / `indexOfMin()` on `Series` and `DataFrame` (`idxmax` / `idxmin`).
+- [x] **Exponentially Weighted Windows (`ewm`) & Rolling `minPeriods`**:
+  - Add `exponentiallyWeighted(_:alpha:adjust:as:)` and `Series.exponentiallyWeightedMean(alpha:adjust:)`.
+  - Add `minPeriods: Int? = nil` support to `rolling`.
+- [x] **Advanced Reshaping, Grouping, Time-Series Resampling & Joins**:
+  - Add non-aggregating `pivoted(index:columns:values:)` (`df.pivot`), `crossTabulated(index:columns:normalize:)` (`pd.crosstab`), and `oneHotEncoded(_:dropFirst:)` (`pd.get_dummies`).
+  - Add `GroupedDataFrame.filter(_:)` (`groupby.filter`), custom output naming on `Aggregation` (`as alias:`), and `DataFrame.pipe(_:)`.
+  - Add `joinAsOf(with:on:by:direction:tolerance:)` (`pd.merge_asof`) and `resample(on:interval:aggregations:)` (`df.resample`).
+- [x] **Structured Result Types Consistency**:
+  - Add `SeriesDescription` (`Series.describeStructured()`) and `QuantileTable` (`DataFrame.quantiles(_:)`), ensuring every statistical/inspection API returns a printable, structured Swift type.
+
+### 7.4 Step 4 — Verification, Benchmarks & Bilingual Documentation Sync
+- [x] Add comprehensive unit tests covering Phase 7 APIs and MLX CPU/GPU parity in `ExtendedAPITests.swift` and `MLXBackendTests.swift` (66/66 passing).
+- [x] Update `CheckPoints.md` and `ToDo.md` with Phase 7 completion details.
+- [x] Synchronize English and Korean documentation (`Documentation/API.md`, `Documentation/API.ko.md`, `README.md`, `README.ko.md`).

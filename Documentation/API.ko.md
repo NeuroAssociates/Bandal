@@ -795,14 +795,14 @@ print(t)
 
 ---
 
-## 16. 윈도우 함수
+## 16. 윈도우 함수 및 고급 분석 API
 
-### 행 개수 기반 롤링 윈도우 (`rolling(_:window:using:)`)
+### 행 개수 기반 롤링 윈도우 (`rolling(_:window:minPeriods:using:)`)
 
-직전 `window`개 행에 대해 `AggregateFunction`을 계산합니다. 첫 윈도우가 채워지기 전 위치(`0 ..< window - 1`)는 `.missing`이 됩니다. 대규모 `.sum`, `.mean`, `.count` 윈도우는 MLX 누적합(prefix sum)으로 벡터화됩니다.
+직전 `window`개 행에 대해 `AggregateFunction`을 계산합니다. 기본값(`minPeriods == nil`)에서는 첫 윈도우가 채워지기 전 위치(`0 ..< window - 1`)가 `.missing`이 되며, `minPeriods`(`1...window`)를 지정하면 부분 윈도우에 대해서도 집계를 계산합니다. 대규모 `.sum`, `.mean`, `.count` 윈도우는 MLX 누적합(prefix sum)으로, 결측이 없는 `.min`, `.max`, `.variance`, `.standardDeviation` 윈도우는 2D `MLX.asStrided` 축소 연산으로 벡터화됩니다.
 
 ```swift
-let rolled = try df.rolling("temp", window: 3, using: .mean)
+let rolled = try df.rolling("temp", window: 3, minPeriods: 1, using: .mean)
 ```
 
 ### 시간 간격 기반 롤링 윈도우 (`rolling(_:on:interval:using:)`)
@@ -818,13 +818,48 @@ let timeRolled = try events.rolling(
 )
 ```
 
-### 확장 윈도우 (`expanding(_:using:)`)
-
-모든 행에 대해 `0...row` 범위의 누적 윈도우에 `AggregateFunction`을 적용합니다:
+### 확장 윈도우 (`expanding(_:using:)`) 및 지수 가중 이동 평균 (`exponentiallyWeighted`)
 
 ```swift
 let cumulativeMean = try df.expanding("temp", using: .mean)
+let ewm = try df.exponentiallyWeighted("temp", alpha: 0.3, adjust: true, as: "temp_ewm")
 ```
+
+### 벡터화 `BooleanMask` 인덱싱 및 조건부 치환 (`where`)
+
+`Series`와 스칼라 값을 비교(`>`, `>=`, `<`, `<=`, `equals(_:)`, `notEquals(_:)`)하여 비트 압축 `BooleanMask`(`&&`, `||`, `!`)를 생성하고, `DataFrame`을 즉시 슬라이싱하거나 조건부로 값을 치환할 수 있습니다:
+
+```swift
+let tempSeries = try df.series("temp")
+let citySeries = try df.series("city")
+let mask: BooleanMask = (tempSeries >= 20.0) && citySeries.equals("Seoul")
+
+let hotSeoul = df[mask] // 또는 try df.filtered(by: mask)
+let clamped = try tempSeries.where(tempSeries >= 0.0, otherwise: 0.0)
+```
+
+### 단항 수학 함수, 거듭제곱, 정규화, 구간화(`cut` / `qcut`) 및 선형 보간
+
+```swift
+let features = try df
+    .applying("temp", function: .log1p, as: "log_temp") // .sqrt, .exp, .log, .log10, .log1p, .sin, .cos, .tan, .sign
+    .power("temp", exponent: 2.0, as: "temp_sq")
+    .standardized("temp", as: "temp_z")                 // (x - mean) / std
+    .minMaxScaled("temp", as: "temp_01")                // (x - min) / (max - min)
+    .binned("temp", edges: [0, 15, 25, 40], labels: ["cold", "mild", "hot"], as: "band")
+    .quantileBinned("temp", quantiles: 4, as: "quartile")
+    .interpolated("temp")                               // 내부 결측치 선형 보간
+```
+
+### 재구조화 확장, 그룹 필터링, 시계열 근접 조인(`joinAsOf`) 및 리샘플링(`resample`)
+
+- `pivoted(index:columns:values:)`: 집계 없이 고유 `(index, columns)` 쌍을 Wide 형태로 재구조화(중복 쌍이 있으면 오류 발생).
+- `crossTabulated(index:columns:normalize:)`: 교차 빈도표(`pd.crosstab`).
+- `oneHotEncoded(_:dropFirst:)`: 범주형/문자열 컬럼의 원-핫 인코딩(`pd.get_dummies`).
+- `GroupedDataFrame.filter(_:)`: 그룹 단위 조건 필터링(`groupby.filter`) 및 `Aggregation("col", using: .sum, as: "custom_alias")` 별칭 지정.
+- `joinAsOf(with:on:by:direction:tolerance:)`: 정렬된 시계열 근접 조인(`pd.merge_asof`, `.backward` / `.forward` / `.nearest`).
+- `resample(on:interval:aggregations:)`: 고정 시간 간격 버킷 집계(`df.resample`).
+- `quantiles(_:)`: 다중 분위수 구조체(`QuantileTable`), `Series.describeStructured()`(`SeriesDescription`), `indexOfMax(in:)` / `indexOfMin(in:)`, `pipe(_:)`.
 
 ---
 
@@ -834,21 +869,22 @@ let cumulativeMean = try df.expanding("temp", using: .mean)
 
 Bandal의 `NumericEngine`은 다음 연산들에 MLX Swift를 사용합니다:
 
-- 기술 통계 모멘트 계산 (`summary`, `statistics`, `describe`, `describeStructured`)
+- 단일 평가(`MLX.eval`)로 융합된 기술 통계 모멘트 계산 (`summary`, `statistics`, `describe`, `describeStructured`)
 - 단일 컬럼 및 전체 프레임 축소 연산 (`sum`, `mean`, `min`, `max`, `count`, `variance`, `standardDeviation`)
 - 그룹별 축소 연산 (`groupBy.aggregate`, `groupBy.transform`, `pivotTable`)
-- 롤링 및 확장 윈도우 (`sum`, `mean`, `count`)
-- 원소별 단항/이항 수치 연산 (`combining`, `scaling`, `Series`의 `+`, `-`, `*`, `/`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`, `cumulative`)
+- 누적합(prefix sum) 및 2D `MLX.asStrided` 기반 롤링/확장 윈도우
+- 박싱 없는 `Float64Column` ↔ `MLXArray` 원소별 단항/이항/거듭제곱/초월함수 수치 연산 (`combining`, `scaling`, `Series`의 `+`, `-`, `*`, `/`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`, `cumulative`, `applying(_: UnaryMathFunction)`, `power`)
 - `MLX.matmul`을 활용한 쌍별 `covariance()` 및 `correlation()` 행렬 계산
 
 ### `ExecutionPolicy` 및 `BandalRuntime`
 
 ```swift
 public enum ExecutionPolicy: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
-    case automatic // 임계값 이상일 때 MLX CPU 스트림(float64) 사용, 미만일 때 네이티브 Swift 사용
-    case native    // 순수 네이티브 Swift(Double) 실행
-    case cpu       // 비어 있지 않은 모든 입력에 대해 MLX CPU 스트림(float64) 강제 사용
-    case gpu       // 값이 Float32로 정확히 표현 가능할 때 MLX GPU 스트림(float32) 사용, 아니면 CPU float64 사용
+    case automatic  // 임계값 이상일 때 MLX CPU 스트림(float64) 사용, 미만일 때 네이티브 Swift 사용
+    case native     // 순수 네이티브 Swift(Double) 실행
+    case cpu        // 비어 있지 않은 모든 입력에 대해 MLX CPU 스트림(float64) 강제 사용
+    case gpu        // 값이 Float32로 정확히 표현 가능할 때 MLX GPU 스트림(float32) 사용, 아니면 CPU float64 사용
+    case gpuFloat32 // 모든 유한 Double 입력을 Float32로 변환하여 Apple Silicon GPU 스트림 강제 가속
 }
 ```
 

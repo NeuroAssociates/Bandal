@@ -10,6 +10,15 @@ Thanks for your interest in Bandal! Bug reports, focused feature proposals, and 
    - `xcrun swift test` — native path; MLX tests are skipped.
    - `Scripts/test-with-mlx.sh` — full suite with MLX active.
 
+## Project structure
+
+- `Sources/Bandal` — the library (`DataFrame`, `Series`, columnar storage, MLX numeric engine).
+- `Sources/BandalBenchmarks` — benchmark executable.
+- `Tests/BandalTests` — Swift Testing suites.
+- `Scripts` — helper scripts (`test-with-mlx.sh`).
+- `Documentation` — `API.md` / `API.ko.md`; `Development/` holds archived design notes and the project history.
+- `AGENTS.md` — project requirements that guide all contributions.
+
 ## Guidelines
 
 - Follow the [Swift API Design Guidelines](https://www.swift.org/documentation/api-design-guidelines/).

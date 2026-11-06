@@ -250,3 +250,112 @@ private func frame() throws -> DataFrame {
     let fromVector = try DataFrame(mlxColumns: [(name: "y", vector: vector)])
     #expect(try fromVector.values(in: "y") == [1.0, 2.0, 4.0])
 }
+
+@Test func supportsVectorizedBooleanMaskAndAdvancedAnalytics() throws {
+    let df = try DataFrame(columns: [
+        (name: "city", values: ["Seoul", "Busan", "Seoul", "Daegu"]),
+        (name: "score", values: [100.0, 40.0, 81.0, 64.0]),
+        (name: "gap", values: [.number(10), .missing, .missing, .number(40)]),
+    ])
+    let scoreSeries = try df.series("score")
+    let citySeries = try df.series("city")
+
+    let mask = (scoreSeries >= 80.0) && citySeries.equals("Seoul")
+    #expect(mask.count == 4)
+    #expect(mask.trueCount == 2)
+    #expect(mask.description.contains("BooleanMask"))
+
+    let sub = df[mask]
+    #expect(sub.rowCount == 2)
+    #expect(try sub.values(in: "score") == [100.0, 81.0])
+
+    let conditional = try scoreSeries.where(scoreSeries >= 70.0, otherwise: 0.0)
+    #expect(conditional.values == [.number(100.0), .number(0.0), .number(81.0), .number(0.0)])
+
+    let interpolated = try df.interpolated("gap")
+    #expect(try interpolated.values(in: "gap") == [10.0, 20.0, 30.0, 40.0])
+
+    let transformed = try df
+        .applying("score", function: .sqrt, as: "root")
+        .power("root", exponent: 2.0, as: "squared")
+        .standardized("score", as: "z")
+        .minMaxScaled("score", as: "minmax")
+        .binned("score", edges: [0, 50, 100], labels: ["low", "high"], as: "tier")
+        .quantileBinned("score", quantiles: 2, labels: ["q1", "q2"], as: "qtier")
+        .exponentiallyWeighted("score", alpha: 0.5, as: "ewm")
+
+    #expect(try transformed.values(in: "root") == [10.0, 6.324555320336759, 9.0, 8.0])
+    #expect(try transformed.values(in: "minmax") == [.number(1.0), .number(0.0), .number(41.0 / 60.0), .number(24.0 / 60.0)])
+    #expect(try transformed.values(in: "tier") == ["high", "low", "high", "high"])
+    #expect(try transformed.values(in: "qtier") == ["q2", "q1", "q2", "q1"])
+    #expect(try df.indexOfMax(in: "score") == 0)
+    #expect(try df.indexOfMin(in: "score") == 1)
+
+    let sDesc = scoreSeries.describeStructured()
+    #expect(sDesc.count == 4)
+    #expect(sDesc.max == 100.0)
+    #expect(sDesc.description.contains("Name: score"))
+
+    let qTable = try df.quantiles([0.25, 0.5, 0.75])
+    #expect(qTable[0.5, "score"] == 72.5)
+    #expect(qTable.description.contains("0.5"))
+}
+
+@Test func supportsPivotedCrossTabOneHotGroupFilterAndTimeSeriesJoins() throws {
+    let longFrame = try DataFrame(columns: [
+        (name: "day", values: ["Mon", "Mon", "Tue", "Tue"]),
+        (name: "metric", values: ["temp", "rain", "temp", "rain"]),
+        (name: "val", values: [20.0, 5.0, 22.0, 0.0]),
+    ])
+    let wide = try longFrame.pivoted(index: "day", columns: "metric", values: "val")
+    #expect(wide.columnNames == ["day", "temp", "rain"])
+    #expect(try wide.values(in: "temp") == [20.0, 22.0])
+
+    let ct = try longFrame.crossTabulated(index: "day", columns: "metric")
+    #expect(try ct.values(in: "temp") == [1.0, 1.0])
+
+    let dummies = try longFrame.oneHotEncoded(["day"], dropFirst: false)
+    #expect(dummies.columnNames.contains("day_Mon"))
+    #expect(dummies.columnNames.contains("day_Tue"))
+
+    let groupFiltered = try longFrame
+        .groupBy("metric")
+        .filter { group in (try group.series("val").sum() ?? 0) > 10 }
+    #expect(groupFiltered.rowCount == 2)
+    #expect(try groupFiltered.values(in: "metric") == ["temp", "temp"])
+
+    let aliasedAgg = try longFrame
+        .groupBy("metric")
+        .aggregate([Aggregation("val", using: .sum, as: "total_val")])
+    #expect(aliasedAgg.columnNames == ["metric", "total_val"])
+
+    let minPeriodsRoll = try longFrame.rolling("val", window: 3, minPeriods: 1, using: .sum)
+    #expect(try minPeriodsRoll.values(in: "val_sum_rolling_3") == [20.0, 25.0, 47.0, 27.0])
+
+    let trades = try DataFrame(columns: [
+        (name: "ts", values: [10.0, 25.0, 40.0]),
+        (name: "qty", values: [1.0, 2.0, 3.0]),
+    ])
+    let quotes = try DataFrame(columns: [
+        (name: "ts", values: [8.0, 20.0, 35.0]),
+        (name: "price", values: [100.0, 102.0, 105.0]),
+    ])
+    let asOf = try trades.joinAsOf(with: quotes, on: "ts", direction: .backward, tolerance: 10.0)
+    #expect(try asOf.values(in: "price") == [100.0, 102.0, 105.0])
+
+    let t0 = Date(timeIntervalSince1970: 0)
+    let tsFrame = try DataFrame(columns: [
+        (name: "ts", values: [.date(t0.addingTimeInterval(10)), .date(t0.addingTimeInterval(20)), .date(t0.addingTimeInterval(75))]),
+        (name: "v", values: [1.0, 3.0, 10.0]),
+    ])
+    let resampled = try tsFrame.resample(
+        on: "ts",
+        interval: 60,
+        aggregations: [Aggregation("v", using: .sum, as: "sum_v")]
+    )
+    #expect(resampled.rowCount == 2)
+    #expect(try resampled.values(in: "sum_v") == [4.0, 10.0])
+
+    let pipedCount = try tsFrame.pipe { $0.rowCount }
+    #expect(pipedCount == 3)
+}

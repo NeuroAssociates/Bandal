@@ -14,7 +14,7 @@ extension DataFrame {
                 guard let buffer = column.numericBuffer else { return nil }
                 let values = buffer.numbers
                 guard !values.isEmpty else {
-                    guard column.values.isEmpty else {
+                    guard column.storage.count == 0 else {
                         return nil
                     }
                     return (
@@ -48,46 +48,103 @@ extension DataFrame {
 
     /// Adds a trailing-window aggregation to a copy of the data frame.
     ///
-    /// The first `window - 1` results are missing because the window is not
-    /// complete. Missing values inside complete windows are ignored; a window
-    /// with no numeric values produces zero for `count` and missing otherwise.
-    /// The output column is named `column_operation_rolling_window`.
+    /// By default (`minPeriods == nil`), the first `window - 1` results are
+    /// missing unless `minPeriods` is set to a smaller positive integer.
+    /// Missing values inside windows are ignored; a window with fewer than
+    /// `minPeriods` non-missing numeric values produces missing (except `count`
+    /// when the window has at least `minPeriods` total rows). The output column
+    /// is named `column_operation_rolling_window`.
     ///
     /// Large inputs compute `sum`, `mean`, and `count` from MLX prefix sums in
-    /// O(n); results can differ from the native direct-window sums by rounding
-    /// error proportional to the magnitude of the running total. The other
-    /// operations always use native Swift.
+    /// O(n) and non-null `min`, `max`, `variance`, and `standardDeviation` via
+    /// 2D strided MLX reductions (`MLX.asStrided`).
     public func rolling(
         _ column: String,
         window: Int,
+        minPeriods: Int? = nil,
         using operation: AggregateFunction
     ) throws -> DataFrame {
         guard window > 0 else { throw DataFrameError.invalidWindowSize(window) }
+        let requiredPeriods = minPeriods ?? window
+        guard requiredPeriods > 0, requiredPeriods <= window else {
+            throw DataFrameError.invalidWindowSize(requiredPeriods)
+        }
         let outputName = "\(column)_\(operation.name)_rolling_\(window)"
         guard !columnNames.contains(outputName) else {
             throw DataFrameError.columnNameConflict(outputName)
         }
 
         let buffer = try numericBuffer(in: column)
-        let source = try values(in: column)
-        if let prefix = prefixSums(of: buffer, for: operation) {
-            let results = source.indices.map { row -> DataValue in
-                guard row + 1 >= window else { return .missing }
-                return Self.windowResult(
-                    prefix, operation: operation, from: row - window, to: row)
-            }
-            return try withColumn(name: outputName, values: results)
+        let srcVals = buffer.floatColumn.values
+        let srcNulls = buffer.floatColumn.nullBitmap
+        let n = buffer.count
+
+        if let stridedCol = NumericEngine.rollingWindowNoNulls(
+            buffer.floatColumn.renamed(to: outputName) as! Float64Column,
+            window: window,
+            minPeriods: requiredPeriods,
+            using: operation
+        ) {
+            return try withColumn(storage: stridedCol)
         }
 
-        let results = source.indices.map { row -> DataValue in
-            guard row + 1 >= window else { return .missing }
-            return aggregateWindow(
-                source,
-                range: (row + 1 - window)..<(row + 1),
-                operation: operation
-            )
+        if let prefix = prefixSums(of: buffer, for: operation) {
+            var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+            var outNulls = BitSet(count: n)
+            for row in 0..<n {
+                let windowRows = Swift.min(row + 1, window)
+                guard windowRows >= requiredPeriods else {
+                    outNulls[row] = true
+                    continue
+                }
+                let start = row - window
+                let validCount = prefix.counts[row] - (start >= 0 ? prefix.counts[start] : 0)
+                if operation == .count {
+                    outVals[row] = Double(validCount)
+                } else if validCount > 0 && (minPeriods == nil || validCount >= requiredPeriods) {
+                    let s = prefix.sums[row] - (start >= 0 ? prefix.sums[start] : 0)
+                    let val = operation == .sum ? s : s / Double(validCount)
+                    if val.isFinite {
+                        outVals[row] = val
+                    } else {
+                        outNulls[row] = true
+                    }
+                } else {
+                    outNulls[row] = true
+                }
+            }
+            return try withColumn(storage: Float64Column(name: outputName, values: outVals, nullBitmap: outNulls))
         }
-        return try withColumn(name: outputName, values: results)
+
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+        var outNulls = BitSet(count: n)
+        var windowBuffer: [Double] = []
+        windowBuffer.reserveCapacity(window)
+
+        for row in 0..<n {
+            let windowRows = Swift.min(row + 1, window)
+            guard windowRows >= requiredPeriods else {
+                outNulls[row] = true
+                continue
+            }
+            let start = Swift.max(0, row + 1 - window)
+            windowBuffer.removeAll(keepingCapacity: true)
+            for idx in start...row where !srcNulls[idx] {
+                windowBuffer.append(srcVals[idx])
+            }
+            if operation == .count {
+                outVals[row] = Double(windowBuffer.count)
+            } else if !windowBuffer.isEmpty,
+                      (minPeriods == nil || windowBuffer.count >= requiredPeriods),
+                      let reduced = Self.reduce(windowBuffer, operation),
+                      reduced.isFinite
+            {
+                outVals[row] = reduced
+            } else {
+                outNulls[row] = true
+            }
+        }
+        return try withColumn(storage: Float64Column(name: outputName, values: outVals, nullBitmap: outNulls))
     }
 
     /// Adds a trailing time-window aggregation over a `.date` column to a copy
@@ -113,8 +170,9 @@ extension DataFrame {
             throw DataFrameError.columnNameConflict(outputName)
         }
 
-        _ = try numericBuffer(in: valueColumn)
-        let valueSource = try values(in: valueColumn)
+        let buffer = try numericBuffer(in: valueColumn)
+        let valVals = buffer.floatColumn.values
+        let valNulls = buffer.floatColumn.nullBitmap
         let dateSource = try values(in: dateColumn)
         var timestamps: [Date?] = []
         timestamps.reserveCapacity(rowCount)
@@ -129,28 +187,32 @@ extension DataFrame {
             }
         }
 
-        var results = Array(repeating: DataValue.missing, count: rowCount)
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: rowCount)
+        var outNulls = BitSet(count: rowCount, repeating: true)
+        var numbers: [Double] = []
         for row in 0..<rowCount {
             guard let current = timestamps[row] else { continue }
             let windowStart = current.addingTimeInterval(-interval)
-            var numbers: [Double] = []
+            numbers.removeAll(keepingCapacity: true)
             for index in 0...row {
                 guard let ts = timestamps[index],
                       ts > windowStart,
                       ts <= current,
-                      case .number(let val) = valueSource[index]
+                      !valNulls[index]
                 else {
                     continue
                 }
-                numbers.append(val)
+                numbers.append(valVals[index])
             }
             if operation == .count {
-                results[row] = .number(Double(numbers.count))
-            } else if !numbers.isEmpty, let reduced = Self.reduce(numbers, operation) {
-                results[row] = .number(reduced)
+                outVals[row] = Double(numbers.count)
+                outNulls[row] = false
+            } else if !numbers.isEmpty, let reduced = Self.reduce(numbers, operation), reduced.isFinite {
+                outVals[row] = reduced
+                outNulls[row] = false
             }
         }
-        return try withColumn(name: outputName, values: results)
+        return try withColumn(storage: Float64Column(name: outputName, values: outVals, nullBitmap: outNulls))
     }
 
     /// Adds an aggregation over each prefix of a column to a copy of the frame.
@@ -173,16 +235,32 @@ extension DataFrame {
         }
 
         let buffer = try numericBuffer(in: column)
-        let source = try values(in: column)
+        let n = buffer.count
         if let prefix = prefixSums(of: buffer, for: operation) {
-            let results = source.indices.map { row in
-                Self.windowResult(prefix, operation: operation, from: -1, to: row)
+            var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+            var outNulls = BitSet(count: n)
+            for row in 0..<n {
+                let count = prefix.counts[row]
+                if operation == .count {
+                    outVals[row] = Double(count)
+                } else if count > 0 {
+                    let s = prefix.sums[row]
+                    let v = operation == .sum ? s : s / Double(count)
+                    if v.isFinite {
+                        outVals[row] = v
+                    } else {
+                        outNulls[row] = true
+                    }
+                } else {
+                    outNulls[row] = true
+                }
             }
-            return try withColumn(name: outputName, values: results)
+            return try withColumn(storage: Float64Column(name: outputName, values: outVals, nullBitmap: outNulls))
         }
-        if let results = Self.runningResults(source, operation: operation) {
-            return try withColumn(name: outputName, values: results)
+        if let runningCol = Self.runningColumn(buffer, name: outputName, operation: operation) {
+            return try withColumn(storage: runningCol)
         }
+        let source = try values(in: column)
         let results = source.indices.map { row in
             aggregateWindow(source, range: 0..<(row + 1), operation: operation)
         }
@@ -190,25 +268,30 @@ extension DataFrame {
     }
 
     /// O(n) native expanding results for operations with a running state.
-    ///
-    /// Accumulates left to right, so values equal `reduce` over each prefix.
-    /// Returns `nil` for median, variance, and standard deviation.
-    private static func runningResults(
-        _ source: [DataValue],
+    private static func runningColumn(
+        _ buffer: NumericBuffer,
+        name: String,
         operation: AggregateFunction
-    ) -> [DataValue]? {
+    ) -> Float64Column? {
         switch operation {
         case .count, .sum, .mean, .min, .max, .first, .last: break
         case .median, .variance, .standardDeviation: return nil
         }
+        let srcVals = buffer.floatColumn.values
+        let srcNulls = buffer.floatColumn.nullBitmap
+        let n = buffer.count
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+        var outNulls = BitSet(count: n)
         var count = 0
         var sum = 0.0
         var minimum = Double.infinity
         var maximum = -Double.infinity
         var first: Double?
         var last: Double?
-        return source.map { value in
-            if case .number(let number) = value {
+
+        for i in 0..<n {
+            if !srcNulls[i] {
+                let number = srcVals[i]
                 count += 1
                 sum += number
                 minimum = Swift.min(minimum, number)
@@ -216,17 +299,26 @@ extension DataFrame {
                 first = first ?? number
                 last = number
             }
-            if operation == .count { return .number(Double(count)) }
-            guard count > 0 else { return .missing }
+            if operation == .count {
+                outVals[i] = Double(count)
+                continue
+            }
+            guard count > 0 else {
+                outNulls[i] = true
+                continue
+            }
             switch operation {
-            case .sum: return .number(sum)
-            case .mean: return .number(sum / Double(count))
-            case .min: return .number(minimum)
-            case .max: return .number(maximum)
-            case .first: return first.map(DataValue.number) ?? .missing
-            default: return last.map(DataValue.number) ?? .missing
+            case .sum: outVals[i] = sum
+            case .mean: outVals[i] = sum / Double(count)
+            case .min: outVals[i] = minimum
+            case .max: outVals[i] = maximum
+            case .first:
+                if let first { outVals[i] = first } else { outNulls[i] = true }
+            default:
+                if let last { outVals[i] = last } else { outNulls[i] = true }
             }
         }
+        return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
     }
 
     /// Prefix sums for `sum`, `mean`, and `count` when MLX is selected.
@@ -237,25 +329,12 @@ extension DataFrame {
         guard operation == .sum || operation == .mean || operation == .count else {
             return nil
         }
-        let numbers = buffer.values.indices.map { index -> Double? in
-            buffer.isMissing[index] ? nil : buffer.values[index]
+        let srcVals = buffer.floatColumn.values
+        let srcNulls = buffer.floatColumn.nullBitmap
+        let numbers = (0..<buffer.count).map { index -> Double? in
+            srcNulls[index] ? nil : srcVals[index]
         }
         return NumericEngine.prefixSums(values: numbers)
-    }
-
-    /// Result for the rows `(start, end]` of the prefix arrays; a negative
-    /// `start` means the window begins at the first row.
-    private static func windowResult(
-        _ prefix: (sums: [Double], counts: [Int]),
-        operation: AggregateFunction,
-        from start: Int,
-        to end: Int
-    ) -> DataValue {
-        let count = prefix.counts[end] - (start >= 0 ? prefix.counts[start] : 0)
-        if operation == .count { return .number(Double(count)) }
-        guard count > 0 else { return .missing }
-        let sum = prefix.sums[end] - (start >= 0 ? prefix.sums[start] : 0)
-        return .number(operation == .sum ? sum : sum / Double(count))
     }
 
     func aggregateWindow(

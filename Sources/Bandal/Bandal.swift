@@ -29,22 +29,27 @@ public enum DataValue: Hashable, Sendable, Codable,
     case date(Date)
     case missing
 
+    /// Creates a `.number` value from a floating-point literal.
     public init(floatLiteral value: Double) {
         self = .number(value)
     }
 
+    /// Creates a `.number` value from an integer literal, converted to `Double`.
     public init(integerLiteral value: Int) {
         self = .number(Double(value))
     }
 
+    /// Creates a `.string` value from a string literal.
     public init(stringLiteral value: String) {
         self = .string(value)
     }
 
+    /// Creates a `.boolean` value from a Boolean literal.
     public init(booleanLiteral value: Bool) {
         self = .boolean(value)
     }
 
+    /// Creates a `.missing` value from a `nil` literal.
     public init(nilLiteral: ()) {
         self = .missing
     }
@@ -78,6 +83,7 @@ public enum DataValue: Hashable, Sendable, Codable,
         self == .missing
     }
 
+    /// A text representation of the cell; dates use ISO 8601 and missing values render as `"nil"`.
     public var description: String {
         switch self {
         case .number(let value):
@@ -93,8 +99,10 @@ public enum DataValue: Hashable, Sendable, Codable,
         }
     }
 
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
 
+    /// Writes ``description`` to the given output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -109,7 +117,9 @@ public enum DataType: String, Hashable, Sendable, Codable, CaseIterable, CustomS
     case mixed
     case unknown
 
+    /// The raw string value of the type, such as `"number"`.
     public var description: String { rawValue }
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { rawValue }
 }
 
@@ -128,6 +138,7 @@ public enum DataFrameError: Error, Equatable, Sendable, LocalizedError {
     case invalidConversion(column: String, row: Int, type: DataType)
     case invalidWindowSize(Int)
 
+    /// A human-readable message describing the error.
     public var errorDescription: String? {
         switch self {
         case .emptyColumns:
@@ -165,11 +176,17 @@ public enum DataFrameError: Error, Equatable, Sendable, LocalizedError {
 /// deviation is the sample standard deviation and is `nil` for fewer than two
 /// numeric values.
 public struct ColumnSummary: Equatable, Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible, TextOutputStreamable {
+    /// The number of numeric, non-missing values.
     public let count: Int
+    /// The arithmetic mean, or `nil` when there are no numeric values.
     public let mean: Double?
+    /// The sample standard deviation, or `nil` for fewer than two numeric values.
     public let standardDeviation: Double?
+    /// The median, or `nil` when there are no numeric values.
     public let median: Double?
+    /// The smallest value, or `nil` when there are no numeric values.
     public let min: Double?
+    /// The largest value, or `nil` when there are no numeric values.
     public let max: Double?
 
     init(
@@ -208,17 +225,29 @@ public enum AggregateFunction: String, Hashable, Sendable, Codable, CaseIterable
     case first
     case last
 
+    /// The raw string value of the function, such as `"sum"`.
     public var description: String { rawValue }
 }
 
 /// A column and reduction to compute as part of a grouped aggregation.
 public struct Aggregation: Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible {
+    /// The name of the column to reduce.
     public let column: String
+    /// The reduction to apply to the column.
     public let function: AggregateFunction
+    /// The name of the result column, or `nil` to use a default name.
+    public let alias: String?
 
-    public init(_ column: String, using function: AggregateFunction) {
+    /// Creates an aggregation.
+    ///
+    /// - Parameters:
+    ///   - column: The name of the column to reduce.
+    ///   - function: The reduction to apply.
+    ///   - alias: An optional name for the result column.
+    public init(_ column: String, using function: AggregateFunction, as alias: String? = nil) {
         self.column = column
         self.function = function
+        self.alias = alias
     }
 }
 
@@ -229,6 +258,7 @@ public enum JoinKind: String, Hashable, Sendable, Codable, CaseIterable, CustomS
     case right
     case full
 
+    /// The raw string value of the join kind, such as `"inner"`.
     public var description: String { rawValue }
 }
 
@@ -238,21 +268,43 @@ public enum DuplicateKeep: String, Hashable, Sendable, Codable, CaseIterable, Cu
     case last
     case none
 
+    /// The raw string value of the option, such as `"first"`.
     public var description: String { rawValue }
 }
 
 /// Configuration for loading a CSV file into a `DataFrame`.
 public struct CSVReadOptions: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    /// The character that separates fields.
     public var delimiter: Character
+    /// The maximum number of data rows to read, or `nil` to read all rows.
     public var maximumRows: Int?
+    /// Whether the first record contains column names.
     public var hasHeader: Bool
+    /// Explicit column names that override or replace the header, or `nil`.
     public var columnNames: [String]?
+    /// The columns to keep, or `nil` to keep all columns.
     public var selectedColumns: [String]?
+    /// Field values that are read as missing.
     public var missingTokens: Set<String>
+    /// Whether fields that look numeric are parsed as numbers.
     public var infersNumbers: Bool
+    /// Explicit types keyed by column name, overriding inference.
     public var columnTypes: [String: DataType]
+    /// The date format used to parse `.date` columns, or `nil`.
     public var dateFormat: String?
 
+    /// Creates CSV read options.
+    ///
+    /// - Parameters:
+    ///   - delimiter: The field separator.
+    ///   - maximumRows: The maximum number of data rows to read, or `nil` for all.
+    ///   - hasHeader: Whether the first record contains column names.
+    ///   - columnNames: Explicit column names, or `nil`.
+    ///   - selectedColumns: The columns to keep, or `nil` for all.
+    ///   - missingTokens: Field values treated as missing.
+    ///   - infersNumbers: Whether numeric-looking fields are parsed as numbers.
+    ///   - columnTypes: Explicit types keyed by column name.
+    ///   - dateFormat: The date format for `.date` columns, or `nil`.
     public init(
         delimiter: Character = ",",
         maximumRows: Int? = nil,
@@ -281,14 +333,22 @@ public enum SortOrder: String, Hashable, Sendable, Codable, CaseIterable, Custom
     case ascending
     case descending
 
+    /// The raw string value of the order, such as `"ascending"`.
     public var description: String { rawValue }
 }
 
 /// A column and direction used when sorting a data frame.
 public struct SortDescriptor: Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible {
+    /// The name of the column to sort by.
     public let column: String
+    /// The direction of the sort.
     public let order: SortOrder
 
+    /// Creates a sort descriptor.
+    ///
+    /// - Parameters:
+    ///   - column: The name of the column to sort by.
+    ///   - order: The sort direction. The default is `.ascending`.
     public init(_ column: String, order: SortOrder = .ascending) {
         self.column = column
         self.order = order
@@ -305,6 +365,12 @@ public struct DataRow: Equatable, Hashable, Sendable, Codable, CustomStringConve
     /// Mapping of column name to cell value.
     public let values: [String: DataValue]
 
+    /// Creates a row.
+    ///
+    /// - Parameters:
+    ///   - index: The zero-based row index in the source frame.
+    ///   - columnOrder: Column names in display order.
+    ///   - values: Cell values keyed by column name.
     public init(index: Int, columnOrder: [String], values: [String: DataValue]) {
         self.index = index
         self.columnOrder = columnOrder
@@ -321,6 +387,7 @@ public struct DataRow: Equatable, Hashable, Sendable, Codable, CustomStringConve
         values[columnOrder[position]] ?? .missing
     }
 
+    /// A pandas-style text rendering with one line per column and a row summary footer.
     public var description: String {
         let width = columnOrder.map(\.count).max() ?? 0
         var lines = columnOrder.map { name in
@@ -331,8 +398,10 @@ public struct DataRow: Equatable, Hashable, Sendable, Codable, CustomStringConve
         return lines.joined(separator: "\n")
     }
 
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
 
+    /// Writes ``description`` to the given output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -349,32 +418,58 @@ struct DataColumn: Equatable, Hashable, Sendable, Codable {
         return storage.toDataValues()
     }
 
-    init(storage: any AnyColumn) {
+    init(storage: any AnyColumn, numericBuffer: NumericBuffer? = nil, cachedValues: [DataValue]? = nil) {
         self.name = storage.name
         self.storage = storage
-        if let floatCol = storage as? Float64Column {
+        if let numericBuffer {
+            self.numericBuffer = numericBuffer
+        } else if let floatCol = storage as? Float64Column {
+            self.numericBuffer = NumericBuffer(floatColumn: floatCol)
+        } else if let intCol = storage as? Int64Column {
+            self.numericBuffer = NumericBuffer(intColumn: intCol)
+        } else if let anyCol = storage as? AnyValueColumn, anyCol.validCount == 0 {
             self.numericBuffer = NumericBuffer(
-                values: Array(floatCol.values),
-                isMissing: (0..<floatCol.count).map { floatCol.nullBitmap[$0] }
+                floatColumn: Float64Column(
+                    name: anyCol.name,
+                    values: ContiguousArray(repeating: 0.0, count: anyCol.count),
+                    nullBitmap: BitSet(count: anyCol.count, repeating: true)
+                )
             )
         } else {
             self.numericBuffer = nil
         }
-        self._cachedValues = nil
+        self._cachedValues = cachedValues
     }
 
     init(name: String, values: [DataValue]) {
-        self.name = name
-        self.storage = AnyColumnFactory.make(name: name, values: values)
-        self.numericBuffer = NumericBuffer(dataValues: values)
-        self._cachedValues = values
+        let col = AnyColumnFactory.make(name: name, values: values)
+        self.init(storage: col, cachedValues: values)
     }
 
     init(name: String, numbers: [Double]) {
-        self.name = name
-        self.storage = Float64Column(name: name, numbers: numbers)
-        self.numericBuffer = NumericBuffer(numbers: numbers)
-        self._cachedValues = numbers.map(DataValue.number)
+        let floatCol = Float64Column(name: name, numbers: numbers)
+        self.init(
+            storage: floatCol,
+            numericBuffer: NumericBuffer(floatColumn: floatCol),
+            cachedValues: nil
+        )
+    }
+
+    func renamed(to newName: String) -> DataColumn {
+        guard newName != name else { return self }
+        let newStorage = storage.renamed(to: newName)
+        let newBuffer: NumericBuffer?
+        if let buf = numericBuffer {
+            let renamedFloatCol = Float64Column(
+                name: newName,
+                values: buf.floatColumn.values,
+                nullBitmap: buf.floatColumn.nullBitmap
+            )
+            newBuffer = NumericBuffer(floatColumn: renamedFloatCol)
+        } else {
+            newBuffer = nil
+        }
+        return DataColumn(storage: newStorage, numericBuffer: newBuffer, cachedValues: _cachedValues)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -453,12 +548,9 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
 
     /// Selects all columns whose inferred type matches `type`.
     public func select(columnsOfType type: DataType) throws -> DataFrame {
-        let selectedNames = try columnNames.filter { try dataType(of: $0) == type }
-        guard !selectedNames.isEmpty else { throw DataFrameError.emptyColumns }
-        let selectedColumns = try selectedNames.map { name in
-            (name: name, values: try values(in: name))
-        }
-        return try DataFrame(columns: selectedColumns)
+        let selected = try columns.filter { try dataType(of: $0.name) == type }
+        guard !selected.isEmpty else { throw DataFrameError.emptyColumns }
+        return try DataFrame(dataColumns: selected)
     }
 
     /// Creates a data frame from named numeric columns.
@@ -543,12 +635,12 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
         self.columnNames = columns.map(\.name)
     }
 
-    init(storageColumns: [any AnyColumn]) throws {
-        guard !storageColumns.isEmpty else {
+    init(dataColumns: [DataColumn]) throws {
+        guard !dataColumns.isEmpty else {
             throw DataFrameError.emptyColumns
         }
         var names = Set<String>()
-        for column in storageColumns {
+        for column in dataColumns {
             guard !column.name.isEmpty else {
                 throw DataFrameError.emptyColumnName
             }
@@ -556,19 +648,23 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
                 throw DataFrameError.duplicateColumnName(column.name)
             }
         }
-        let expectedCount = storageColumns[0].count
-        for column in storageColumns {
-            guard column.count == expectedCount else {
+        let expectedCount = dataColumns[0].storage.count
+        for column in dataColumns {
+            guard column.storage.count == expectedCount else {
                 throw DataFrameError.unequalColumnLengths(
                     column: column.name,
                     expected: expectedCount,
-                    actual: column.count
+                    actual: column.storage.count
                 )
             }
         }
-        self.columns = storageColumns.map { DataColumn(storage: $0) }
+        self.columns = dataColumns
         self.rowCount = expectedCount
-        self.columnNames = storageColumns.map(\.name)
+        self.columnNames = dataColumns.map(\.name)
+    }
+
+    init(storageColumns: [any AnyColumn]) throws {
+        try self.init(dataColumns: storageColumns.map { DataColumn(storage: $0) })
     }
 
     func rows(in range: Range<Int>) throws -> DataFrame {
@@ -591,35 +687,49 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
 }
 
 extension ColumnSummary {
+    /// A one-line summary of the statistics; unavailable values render as `NaN`.
     public var description: String {
         func f(_ v: Double?) -> String { v.map { String(format: "%.6g", $0) } ?? "NaN" }
         return "count \(count), mean \(f(mean)), std \(f(standardDeviation)), "
             + "median \(f(median)), min \(f(min)), max \(f(max))"
     }
 
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
 
+    /// Writes ``description`` to the given output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
 }
 
 extension Aggregation {
-    public var description: String { "\(function.name)(\(column))" }
+    /// A text form such as `sum(price) as total`, omitting the alias when absent.
+    public var description: String {
+        if let alias {
+            return "\(function.name)(\(column)) as \(alias)"
+        }
+        return "\(function.name)(\(column))"
+    }
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
 }
 
 extension SortDescriptor {
+    /// A text form such as `price descending`.
     public var description: String { "\(column) \(order == .ascending ? "ascending" : "descending")" }
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
 }
 
 extension CSVReadOptions {
+    /// A one-line summary of the main options.
     public var description: String {
         "CSVReadOptions(delimiter: \"\(delimiter)\", hasHeader: \(hasHeader), "
             + "maximumRows: \(maximumRows.map(String.init) ?? "all"), "
             + "infersNumbers: \(infersNumbers), missingTokens: \(missingTokens.sorted()))"
     }
 
+    /// A debugging representation identical to ``description``.
     public var debugDescription: String { description }
 }
