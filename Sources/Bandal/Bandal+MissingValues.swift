@@ -24,16 +24,18 @@ extension DataFrame {
         if let buffer = column.numericBuffer {
             return buffer.isMissing
         }
-        return column.values.map { $0 == .missing }
+        let bm = column.storage.nullBitmap
+        let n = column.storage.count
+        if bm.allFalse {
+            return Array(repeating: false, count: n)
+        }
+        return (0..<n).map { bm[$0] }
     }
 
     /// Returns the number of missing values in each column.
     public func missingCounts() -> [String: Int] {
         Dictionary(uniqueKeysWithValues: columns.map { column in
-            if let buffer = column.numericBuffer {
-                return (column.name, buffer.count - buffer.nonMissingCount)
-            }
-            return (column.name, column.values.filter { $0 == .missing }.count)
+            (column.name, column.storage.nullCount)
         })
     }
 
@@ -46,16 +48,53 @@ extension DataFrame {
         with replacement: DataValue
     ) throws -> DataFrame {
         let names = try validatedColumnNames(selectedColumns)
-        let selected = Set(names)
-        let updated = columns.map { column in
-            (
-                name: column.name,
-                values: selected.contains(column.name)
-                    ? column.values.map { $0 == .missing ? replacement : $0 }
-                    : column.values
-            )
+        if case .number(let number) = replacement, !number.isFinite {
+            for col in columns where names.contains(col.name) {
+                for row in 0..<col.storage.count where col.storage.isNull(at: row) {
+                    throw DataFrameError.nonFiniteValue(column: col.name, row: row)
+                }
+            }
         }
-        return try DataFrame(columns: updated)
+        guard replacement != .missing else { return self }
+        let selected = Set(names)
+        let updated: [DataColumn] = columns.map { column in
+            guard selected.contains(column.name), column.storage.hasNulls else {
+                return column
+            }
+            if let floatCol = column.storage as? Float64Column,
+               case .number(let number) = replacement
+            {
+                var newVals = floatCol.values
+                let bm = floatCol.nullBitmap
+                for i in 0..<newVals.count where bm[i] {
+                    newVals[i] = number
+                }
+                let filled = Float64Column(
+                    name: column.name,
+                    values: newVals,
+                    nullBitmap: BitSet(count: newVals.count)
+                )
+                return DataColumn(storage: filled)
+            }
+            if let strCol = column.storage as? StringColumn,
+               case .string(let text) = replacement
+            {
+                var newStrings = strCol.stringData
+                let bm = strCol.nullBitmap
+                for i in 0..<newStrings.count where bm[i] {
+                    newStrings[i] = text
+                }
+                let filled = StringColumn(
+                    name: column.name,
+                    stringData: newStrings,
+                    nullBitmap: BitSet(count: newStrings.count)
+                )
+                return DataColumn(storage: filled)
+            }
+            let filledValues = column.values.map { $0 == .missing ? replacement : $0 }
+            return DataColumn(name: column.name, values: filledValues)
+        }
+        return try DataFrame(dataColumns: updated)
     }
 
     /// Returns a copy with rows containing missing values removed.
@@ -64,11 +103,15 @@ extension DataFrame {
     public func dropMissing(in selectedColumns: [String]? = nil) throws -> DataFrame {
         let names = try validatedColumnNames(selectedColumns)
         let selected = Set(names)
-        let selectedValues = columns.filter { selected.contains($0.name) }.map(\.values)
-        let indices = (0..<rowCount).filter { row in
-            selectedValues.allSatisfy { $0[row] != .missing }
+        let selectedCols = columns.filter { selected.contains($0.name) }
+        var combinedNulls = BitSet(count: rowCount)
+        for col in selectedCols where col.storage.hasNulls {
+            combinedNulls = combinedNulls.bitwiseOr(col.storage.nullBitmap)
         }
-        return try rows(at: indices)
+        if combinedNulls.allFalse {
+            return self
+        }
+        return try rows(matching: combinedNulls.inverted())
     }
 
     private func validatedColumnNames(_ requestedNames: [String]?) throws -> [String] {

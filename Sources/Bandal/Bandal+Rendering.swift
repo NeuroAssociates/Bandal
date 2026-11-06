@@ -9,6 +9,12 @@ public struct RenderOptions: Equatable, Hashable, Sendable, Codable, CustomStrin
     /// Optional maximum width per cell; longer cells are truncated with `…`.
     public var maxColumnWidth: Int?
 
+    /// Creates rendering options.
+    ///
+    /// - Parameters:
+    ///   - maxRows: The maximum number of rows shown before truncation.
+    ///   - maxColumns: The maximum number of columns shown before truncation.
+    ///   - maxColumnWidth: The maximum cell width, or `nil` for no limit.
     public init(
         maxRows: Int = 10,
         maxColumns: Int = 8,
@@ -19,10 +25,12 @@ public struct RenderOptions: Equatable, Hashable, Sendable, Codable, CustomStrin
         self.maxColumnWidth = maxColumnWidth
     }
 
+    /// A textual summary of the options.
     public var description: String {
         "RenderOptions(maxRows: \(maxRows), maxColumns: \(maxColumns), maxColumnWidth: \(maxColumnWidth.map(String.init) ?? "none"))"
     }
 
+    /// A debugging representation; identical to ``description``.
     public var debugDescription: String { description }
 }
 
@@ -35,10 +43,12 @@ extension DataFrame {
         render()
     }
 
+    /// A debugging representation; identical to ``description``.
     public var debugDescription: String {
         description
     }
 
+    /// Writes ``description`` to the given output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }

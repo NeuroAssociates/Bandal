@@ -795,14 +795,14 @@ print(t)
 
 ---
 
-## 16. Window Functions
+## 16. Window Functions & Advanced Analytics
 
-### Row-Count Rolling Window (`rolling(_:window:using:)`)
+### Row-Count Rolling Window (`rolling(_:window:minPeriods:using:)`)
 
-Applies any `AggregateFunction` over a trailing window of `window` rows. Positions before the first full window (`0 ..< window - 1`) produce `.missing`. Large `.sum`, `.mean`, and `.count` windows are vectorized with prefix sums on MLX.
+Applies any `AggregateFunction` over a trailing window of `window` rows. By default (`minPeriods == nil`), positions before the first full window (`0 ..< window - 1`) produce `.missing`; set `minPeriods` (`1...window`) to emit results for partial leading windows. Large `.sum`, `.mean`, and `.count` windows use MLX prefix sums, and non-null `.min`, `.max`, `.variance`, and `.standardDeviation` windows use 2D `MLX.asStrided` reductions.
 
 ```swift
-let rolled = try df.rolling("temp", window: 3, using: .mean)
+let rolled = try df.rolling("temp", window: 3, minPeriods: 1, using: .mean)
 ```
 
 ### Time-Based Rolling Window (`rolling(_:on:interval:using:)`)
@@ -818,13 +818,49 @@ let timeRolled = try events.rolling(
 )
 ```
 
-### Expanding Window (`expanding(_:using:)`)
-
-Applies an `AggregateFunction` over `0...row` for every row:
+### Expanding Window (`expanding(_:using:)`) & Exponentially Weighted Moving Average (`exponentiallyWeighted`)
 
 ```swift
 let cumulativeMean = try df.expanding("temp", using: .mean)
+let ewm = try df.exponentiallyWeighted("temp", alpha: 0.3, adjust: true, as: "temp_ewm")
 ```
+
+### Vectorized `BooleanMask` Indexing & Conditional Replacement (`where`)
+
+Compare a `Series` against a scalar (`>`, `>=`, `<`, `<=`, `equals(_:)`, `notEquals(_:)`) to obtain a bit-packed `BooleanMask` (`&&`, `||`, `!`) and slice a `DataFrame` or replace values conditionally:
+
+```swift
+let tempSeries = try df.series("temp")
+let citySeries = try df.series("city")
+let mask: BooleanMask = (tempSeries >= 20.0) && citySeries.equals("Seoul")
+
+let hotSeoul = df[mask] // or try df.filtered(by: mask)
+let clamped = try tempSeries.where(tempSeries >= 0.0, otherwise: 0.0)
+```
+
+### Unary Math, Power, Standardization, Binning (`cut` / `qcut`) & Interpolation
+
+```swift
+let features = try df
+    .applying("temp", function: .log1p, as: "log_temp") // .sqrt, .exp, .log, .log10, .log1p, .sin, .cos, .tan, .sign
+    .power("temp", exponent: 2.0, as: "temp_sq")
+    .standardized("temp", as: "temp_z")                 // (x - mean) / std
+    .minMaxScaled("temp", as: "temp_01")                // (x - min) / (max - min)
+    .binned("temp", edges: [0, 15, 25, 40], labels: ["cold", "mild", "hot"], as: "band")
+    .quantileBinned("temp", quantiles: 4, as: "quartile")
+    .interpolated("temp")                               // linear interpolation of interior missing values
+```
+
+### Reshaping Extensions, Group Filtering, Time-Series As-Of Join & Resampling
+
+- `pivoted(index:columns:values:)`: Exact wide reshape without aggregation (throws if duplicate `(index, columns)` pairs exist).
+- `crossTabulated(index:columns:normalize:)`: Contingency table (`pd.crosstab`).
+- `oneHotEncoded(_:dropFirst:)`: Indicator columns (`pd.get_dummies`).
+- `GroupedDataFrame.filter(_:)`: Filter groups by a `DataFrame` predicate (`groupby.filter`) and `Aggregation("col", using: .sum, as: "custom_alias")`.
+- `joinAsOf(with:on:by:direction:tolerance:)`: Ordered time-series join (`pd.merge_asof`) supporting `.backward`, `.forward`, and `.nearest`.
+- `resample(on:interval:aggregations:)`: Fixed-interval time-bucket aggregation (`df.resample`).
+- `quantiles(_:)`: Multi-quantile structured result (`QuantileTable`), and `Series.describeStructured()` (`SeriesDescription`).
+- `indexOfMax(in:)` / `indexOfMin(in:)` and `pipe(_:)`.
 
 ---
 
@@ -834,21 +870,22 @@ let cumulativeMean = try df.expanding("temp", using: .mean)
 
 Bandal's `NumericEngine` uses MLX Swift across:
 
-- Descriptive moments (`summary`, `statistics`, `describe`, `describeStructured`)
+- Fused single-eval descriptive moments (`summary`, `statistics`, `describe`, `describeStructured`)
 - Single-column and whole-frame reductions (`sum`, `mean`, `min`, `max`, `count`, `variance`, `standardDeviation`)
 - Grouped reductions (`groupBy.aggregate`, `groupBy.transform`, `pivotTable`)
-- Rolling and expanding windows (`sum`, `mean`, `count`)
-- Element-wise unary and binary operations (`combining`, `scaling`, `Series` `+`, `-`, `*`, `/`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`, `cumulative`)
+- Prefix-sum and 2D strided (`MLX.asStrided`) rolling and expanding windows
+- Zero-boxing `Float64Column` ↔ `MLXArray` unary, binary, power, and math functions (`combining`, `scaling`, `Series` `+`, `-`, `*`, `/`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`, `cumulative`, `applying(_: UnaryMathFunction)`, `power`)
 - Pairwise `covariance()` and `correlation()` matrices via `MLX.matmul`
 
 ### `ExecutionPolicy` & `BandalRuntime`
 
 ```swift
 public enum ExecutionPolicy: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
-    case automatic // MLX CPU stream (float64) above threshold; native Swift below
-    case native    // Pure native Swift (Double)
-    case cpu       // Force MLX CPU stream (float64) for all non-empty inputs
-    case gpu       // MLX GPU stream (float32) when values are exact in Float32, else CPU float64
+    case automatic  // MLX CPU stream (float64) above threshold; native Swift below
+    case native     // Pure native Swift (Double)
+    case cpu        // Force MLX CPU stream (float64) for all non-empty inputs
+    case gpu        // MLX GPU stream (float32) when values are exact in Float32, else CPU float64
+    case gpuFloat32 // Force MLX GPU stream (float32) for all finite Double inputs (casting to Float32)
 }
 ```
 

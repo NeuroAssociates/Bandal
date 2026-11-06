@@ -2,34 +2,117 @@ import Foundation
 
 /// A single named column of a ``DataFrame``.
 ///
-/// `Series` is a value type. Its `description` prints an index-labelled table
-/// in the same style as ``DataFrame/description``.
+/// `Series` is a value type backed by typed columnar storage (`AnyColumn`).
+/// Its `description` prints an index-labelled table in the same style as
+/// ``DataFrame/description``.
 public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible, TextOutputStreamable {
     /// The column name.
     public let name: String
-    /// The values in row order.
-    public let values: [DataValue]
+    /// Typed columnar storage.
+    let storage: any AnyColumn
     /// Cached numeric buffer when all non-missing values are `.number`.
     let numericBuffer: NumericBuffer?
+    private let _cachedValues: [DataValue]?
+
+    /// The values in row order.
+    public var values: [DataValue] {
+        _cachedValues ?? storage.toDataValues()
+    }
 
     /// Creates a series from a name and values.
     public init(name: String, values: [DataValue]) {
         self.name = name
-        self.values = values
-        self.numericBuffer = NumericBuffer(dataValues: values)
+        self._cachedValues = values
+        let built = AnyColumnFactory.make(name: name, values: values)
+        self.storage = built
+        if let floatCol = built as? Float64Column {
+            self.numericBuffer = NumericBuffer(floatColumn: floatCol)
+        } else if let intCol = built as? Int64Column {
+            self.numericBuffer = NumericBuffer(intColumn: intCol)
+        } else if let anyCol = built as? AnyValueColumn, built.nullCount == built.count {
+            let emptyFloat = Float64Column(
+                name: name,
+                values: ContiguousArray(repeating: 0.0, count: anyCol.count),
+                nullBitmap: BitSet(count: anyCol.count, repeating: true)
+            )
+            self.numericBuffer = NumericBuffer(floatColumn: emptyFloat)
+        } else {
+            self.numericBuffer = nil
+        }
     }
 
-    /// Creates a numeric series from `Double` values.
+    /// Creates a numeric series from `Double` values without boxing into `[DataValue]`.
     public init(name: String, numbers: [Double]) {
+        let floatCol = Float64Column(
+            name: name,
+            values: ContiguousArray(numbers),
+            nullBitmap: BitSet(count: numbers.count)
+        )
         self.name = name
-        self.values = numbers.map(DataValue.number)
-        self.numericBuffer = NumericBuffer(numbers: numbers)
+        self.storage = floatCol
+        self.numericBuffer = NumericBuffer(floatColumn: floatCol)
+        self._cachedValues = nil
+    }
+
+    /// Creates a numeric series from optional `Double?` values (`nil` becomes `.missing`).
+    public init(name: String, values: [Double?]) {
+        var arr = ContiguousArray<Double>(repeating: 0.0, count: values.count)
+        var nulls = BitSet(count: values.count)
+        for i in 0..<values.count {
+            if let v = values[i], v.isFinite {
+                arr[i] = v
+            } else {
+                nulls[i] = true
+            }
+        }
+        let floatCol = Float64Column(name: name, values: arr, nullBitmap: nulls)
+        self.name = name
+        self.storage = floatCol
+        self.numericBuffer = NumericBuffer(floatColumn: floatCol)
+        self._cachedValues = nil
+    }
+
+    init(storage: any AnyColumn, numericBuffer: NumericBuffer? = nil, cachedValues: [DataValue]? = nil) {
+        self.name = storage.name
+        self.storage = storage
+        self._cachedValues = cachedValues
+        if let numericBuffer {
+            self.numericBuffer = numericBuffer
+        } else if let floatCol = storage as? Float64Column {
+            self.numericBuffer = NumericBuffer(floatColumn: floatCol)
+        } else if let intCol = storage as? Int64Column {
+            self.numericBuffer = NumericBuffer(intColumn: intCol)
+        } else if let anyCol = storage as? AnyValueColumn, storage.nullCount == storage.count {
+            let emptyFloat = Float64Column(
+                name: storage.name,
+                values: ContiguousArray(repeating: 0.0, count: anyCol.count),
+                nullBitmap: BitSet(count: anyCol.count, repeating: true)
+            )
+            self.numericBuffer = NumericBuffer(floatColumn: emptyFloat)
+        } else {
+            self.numericBuffer = nil
+        }
     }
 
     init(column: DataColumn) {
         self.name = column.name
-        self.values = column.values
+        self.storage = column.storage
         self.numericBuffer = column.numericBuffer
+        self._cachedValues = nil
+    }
+
+    func renamed(to newName: String) -> Series {
+        guard newName != name else { return self }
+        let newStorage = storage.renamed(to: newName)
+        let newBuffer: NumericBuffer?
+        if let numericBuffer {
+            let fc = numericBuffer.floatColumn
+            let renamedFloat = Float64Column(name: newName, values: fc.values, nullBitmap: fc.nullBitmap)
+            newBuffer = NumericBuffer(floatColumn: renamedFloat)
+        } else {
+            newBuffer = nil
+        }
+        return Series(storage: newStorage, numericBuffer: newBuffer, cachedValues: _cachedValues)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -37,6 +120,9 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         case values
     }
 
+    /// Creates a series by decoding its `name` and `values`.
+    ///
+    /// - Throws: A decoding error if either key is missing or malformed.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedName = try container.decode(String.self, forKey: .name)
@@ -44,42 +130,54 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         self.init(name: decodedName, values: decodedValues)
     }
 
+    /// Encodes the series' `name` and `values`.
+    ///
+    /// - Throws: An encoding error if a value cannot be encoded.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(values, forKey: .values)
     }
 
+    /// Returns a Boolean value indicating whether two series have the same name and equal values.
     public static func == (lhs: Series, rhs: Series) -> Bool {
-        lhs.name == rhs.name && lhs.values == rhs.values
+        guard lhs.name == rhs.name, lhs.count == rhs.count else { return false }
+        if let lf = lhs.storage as? Float64Column, let rf = rhs.storage as? Float64Column {
+            return lf.nullBitmap == rf.nullBitmap && lf.values == rf.values
+        }
+        return lhs.values == rhs.values
     }
 
+    /// Hashes the series' name and values into the given hasher.
     public func hash(into hasher: inout Hasher) {
         hasher.combine(name)
         hasher.combine(values)
     }
 
     /// The number of rows, including missing values.
-    public var count: Int { values.count }
+    public var count: Int { storage.count }
 
     /// Whether the series has zero elements.
-    public var isEmpty: Bool { values.isEmpty }
+    public var isEmpty: Bool { storage.count == 0 }
 
     /// Number of `.missing` elements.
     public var missingCount: Int {
-        if let numericBuffer {
-            return numericBuffer.count - numericBuffer.nonMissingCount
-        }
-        return values.reduce(0) { $0 + ($1 == .missing ? 1 : 0) }
+        storage.nullCount
     }
 
     /// Number of non-missing elements.
     public var nonMissingCount: Int {
-        count - missingCount
+        storage.count - storage.nullCount
     }
 
     /// The inferred data type of the series, ignoring `.missing` values.
     public var dtype: DataType {
+        if storage.nullCount == storage.count {
+            return .unknown
+        }
+        if storage.dataType != .mixed && storage.dataType != .unknown {
+            return storage.dataType
+        }
         var types = Set<DataType>()
         for value in values where value != .missing {
             switch value {
@@ -106,7 +204,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
     /// Accesses the element at `index`.
     public subscript(index: Int) -> DataValue {
-        values[index]
+        storage.value(at: index)
     }
 
     /// Reduces the numeric values with `function`; `.missing` when undefined.
@@ -115,9 +213,15 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         case .count:
             return .number(Double(nonMissingCount))
         case .first:
-            return values.first { $0 != .missing } ?? .missing
+            for i in 0..<count where !storage.isNull(at: i) {
+                return storage.value(at: i)
+            }
+            return .missing
         case .last:
-            return values.last { $0 != .missing } ?? .missing
+            for i in (0..<count).reversed() where !storage.isNull(at: i) {
+                return storage.value(at: i)
+            }
+            return .missing
         default:
             return DataFrame.reduce(numbers, function).map(DataValue.number) ?? .missing
         }
@@ -148,7 +252,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     public func quantile(_ probability: Double) -> Double? {
         let nums = numbers
         guard !nums.isEmpty else { return nil }
-        let sorted = MLXDeviceVector(nums)?.sortedValues() ?? nums.sorted()
+        let sorted = MLXDeviceVector(nums, minimumCount: MLXBackend.automaticComplexMinimumCount)?.sortedValues() ?? nums.sorted()
         return NumericEngine.quantile(sorted: sorted, probability: probability)
     }
 
@@ -228,7 +332,21 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// The number of distinct non-missing values.
-    public func uniqueCount() -> Int { unique().count }
+    public func uniqueCount() -> Int {
+        if let catCol = storage as? CategoricalColumn {
+            if !catCol.hasNulls {
+                return catCol.dictionary.count
+            }
+            var seen = Set<UInt32>()
+            let codes = catCol.codes
+            let nulls = catCol.nullBitmap
+            for i in 0..<codes.count where !nulls[i] {
+                seen.insert(codes[i])
+            }
+            return seen.count
+        }
+        return unique().count
+    }
 
     /// Frequencies of non-missing values, most frequent first.
     ///
@@ -251,12 +369,23 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
     /// Returns a Boolean mask indicating whether each element belongs to `candidates`.
     public func isin(_ candidates: Set<DataValue>) -> [Bool] {
-        values.map { candidates.contains($0) }
+        (0..<count).map { candidates.contains(storage.value(at: $0)) }
     }
 
     /// Returns a Boolean mask indicating whether each numeric element lies in `lower...upper`.
     public func between(lower: Double, upper: Double, inclusive: Bool = true) -> [Bool] {
-        values.map { value in
+        if let buffer = numericBuffer {
+            let vals = buffer.floatColumn.values
+            let nulls = buffer.floatColumn.nullBitmap
+            return (0..<count).map { i in
+                guard !nulls[i] else { return false }
+                let number = vals[i]
+                return inclusive
+                    ? (number >= lower && number <= upper)
+                    : (number > lower && number < upper)
+            }
+        }
+        return values.map { value in
             guard case .number(let number) = value else { return false }
             return inclusive
                 ? (number >= lower && number <= upper)
@@ -274,16 +403,19 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.clip(buffer, lower: lower, upper: upper) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.clipColumn(buffer, name: name, lower: lower, upper: upper) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let output = values.map { value -> DataValue in
-            guard case .number(var number) = value else { return .missing }
-            if let lower { number = Swift.max(number, lower) }
-            if let upper { number = Swift.min(number, upper) }
-            return .number(number)
+        var outVals = buffer.floatColumn.values
+        let nulls = buffer.floatColumn.nullBitmap
+        for i in 0..<outVals.count where !nulls[i] {
+            var v = outVals[i]
+            if let lower { v = Swift.max(v, lower) }
+            if let upper { v = Swift.min(v, upper) }
+            outVals[i] = v
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: nulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Returns a copy with numeric values rounded to `decimals` decimal places.
@@ -291,15 +423,17 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.round(buffer, decimals: decimals) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.roundColumn(buffer, name: name, decimals: decimals) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
         let scale = pow(10.0, Double(decimals))
-        let output = values.map { value -> DataValue in
-            guard case .number(let number) = value else { return .missing }
-            return .number((number * scale).rounded(.toNearestOrEven) / scale)
+        var outVals = buffer.floatColumn.values
+        let nulls = buffer.floatColumn.nullBitmap
+        for i in 0..<outVals.count where !nulls[i] {
+            outVals[i] = (outVals[i] * scale).rounded(.toNearestOrEven) / scale
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: nulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Returns a copy with the absolute value of each numeric element.
@@ -307,14 +441,16 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.abs(buffer) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.absColumn(buffer, name: name) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let output = values.map { value -> DataValue in
-            guard case .number(let number) = value else { return .missing }
-            return .number(Swift.abs(number))
+        var outVals = buffer.floatColumn.values
+        let nulls = buffer.floatColumn.nullBitmap
+        for i in 0..<outVals.count where !nulls[i] {
+            outVals[i] = Swift.abs(outVals[i])
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: nulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Returns a copy with cumulative `sum`, `product`, `minimum`, or `maximum`.
@@ -322,12 +458,14 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.cumulative(buffer, using: function) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.cumulativeColumn(buffer, name: name, using: function) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
+        var outVals = buffer.floatColumn.values
+        var outNulls = buffer.floatColumn.nullBitmap
         var state: Double?
-        let output = values.map { value -> DataValue in
-            guard case .number(let number) = value else { return .missing }
+        for i in 0..<outVals.count where !outNulls[i] {
+            let number = outVals[i]
             switch (function, state) {
             case (_, nil): state = number
             case (.sum, let s?): state = s + number
@@ -335,16 +473,40 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
             case (.minimum, let s?): state = Swift.min(s, number)
             case (.maximum, let s?): state = Swift.max(s, number)
             }
-            return .number(state ?? number)
+            let val = state ?? number
+            if val.isFinite {
+                outVals[i] = val
+            } else {
+                outVals[i] = 0.0
+                outNulls[i] = true
+            }
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Returns a copy shifted by `periods` positions, filling vacated entries with `fill`.
     public func shifted(by periods: Int = 1, fillWith fill: DataValue = .missing) -> Series {
-        let output = values.indices.map { row -> DataValue in
+        if let buffer = numericBuffer, fill == .missing {
+            let srcVals = buffer.floatColumn.values
+            let srcNulls = buffer.floatColumn.nullBitmap
+            let n = srcVals.count
+            var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+            var outNulls = BitSet(count: n, repeating: true)
+            for row in 0..<n {
+                let idx = row - periods
+                if (0..<n).contains(idx) && !srcNulls[idx] {
+                    outVals[row] = srcVals[idx]
+                    outNulls[row] = false
+                }
+            }
+            let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
+        }
+        let vals = values
+        let output = vals.indices.map { row -> DataValue in
             let index = row - periods
-            return values.indices.contains(index) ? values[index] : fill
+            return vals.indices.contains(index) ? vals[index] : fill
         }
         return Series(name: name, values: output)
     }
@@ -354,20 +516,25 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.difference(buffer, periods: periods) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.differenceColumn(buffer, name: name, periods: periods) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let output = values.indices.map { row -> DataValue in
+        let srcVals = buffer.floatColumn.values
+        let srcNulls = buffer.floatColumn.nullBitmap
+        let n = srcVals.count
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+        var outNulls = BitSet(count: n, repeating: true)
+        for row in 0..<n {
             let index = row - periods
-            guard values.indices.contains(index),
-                  case .number(let current) = values[row],
-                  case .number(let prior) = values[index]
-            else {
-                return .missing
+            guard (0..<n).contains(index), !srcNulls[row], !srcNulls[index] else { continue }
+            let d = srcVals[row] - srcVals[index]
+            if d.isFinite {
+                outVals[row] = d
+                outNulls[row] = false
             }
-            return .number(current - prior)
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Returns the fractional change from `periods` elements earlier.
@@ -375,21 +542,27 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.percentChange(buffer, periods: periods) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.percentChangeColumn(buffer, name: name, periods: periods) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let output = values.indices.map { row -> DataValue in
+        let srcVals = buffer.floatColumn.values
+        let srcNulls = buffer.floatColumn.nullBitmap
+        let n = srcVals.count
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: n)
+        var outNulls = BitSet(count: n, repeating: true)
+        for row in 0..<n {
             let index = row - periods
-            guard values.indices.contains(index),
-                  case .number(let current) = values[row],
-                  case .number(let prior) = values[index],
-                  prior != 0
-            else {
-                return .missing
+            guard (0..<n).contains(index), !srcNulls[row], !srcNulls[index], srcVals[index] != 0 else {
+                continue
             }
-            return .number(current / prior - 1)
+            let pct = srcVals[row] / srcVals[index] - 1.0
+            if pct.isFinite {
+                outVals[row] = pct
+                outNulls[row] = false
+            }
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Computes average-tie ranks (1-based) for numeric values, keeping `.missing` as `.missing`.
@@ -397,30 +570,33 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
+        let srcVals = buffer.floatColumn.values
+        let srcNulls = buffer.floatColumn.nullBitmap
         var indexed: [(row: Int, value: Double)] = []
         indexed.reserveCapacity(buffer.nonMissingCount)
-        for row in 0..<buffer.count where !buffer.isMissing[row] {
-            indexed.append((row: row, value: buffer.values[row]))
+        for row in 0..<buffer.count where !srcNulls[row] {
+            indexed.append((row: row, value: srcVals[row]))
         }
         indexed.sort { lhs, rhs in
             ascending ? lhs.value < rhs.value : lhs.value > rhs.value
         }
 
-        var output = Array(repeating: DataValue.missing, count: buffer.count)
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: buffer.count)
+        let outNulls = srcNulls
         var start = 0
         while start < indexed.count {
             var end = start + 1
             while end < indexed.count && indexed[end].value == indexed[start].value {
                 end += 1
             }
-            // 1-based average rank of positions (start + 1)...end
             let avgRank = Double(start + 1 + end) / 2.0
             for k in start..<end {
-                output[indexed[k].row] = .number(avgRank)
+                outVals[indexed[k].row] = avgRank
             }
             start = end
         }
-        return Series(name: "\(name)_rank", values: output)
+        let col = Float64Column(name: "\(name)_rank", values: outVals, nullBitmap: outNulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     // MARK: Vectorized arithmetic
@@ -430,23 +606,34 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
         }
-        if let mlxResult = NumericEngine.scalarArithmetic(buffer: buffer, scalar: scalar, operation: operation) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.scalarArithmeticColumn(buffer: buffer, name: name, scalar: scalar, operation: operation) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let output = values.map { value -> DataValue in
-            guard case .number(let number) = value else { return .missing }
+        let srcVals = buffer.floatColumn.values
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: buffer.count)
+        var outNulls = buffer.floatColumn.nullBitmap
+        if operation == .divide && scalar == 0 {
+            outNulls = BitSet(count: buffer.count, repeating: true)
+            let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
+        }
+        for i in 0..<srcVals.count where !outNulls[i] {
+            let number = srcVals[i]
             let result: Double
             switch operation {
             case .add: result = number + scalar
             case .subtract: result = number - scalar
             case .multiply: result = number * scalar
-            case .divide:
-                guard scalar != 0 else { return .missing }
-                result = number / scalar
+            case .divide: result = number / scalar
             }
-            return result.isFinite ? .number(result) : .missing
+            if result.isFinite {
+                outVals[i] = result
+            } else {
+                outNulls[i] = true
+            }
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
     /// Applies an element-wise arithmetic operation with another `Series` of equal length.
@@ -464,57 +651,90 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         guard let rightBuffer = other.numericBuffer else {
             throw DataFrameError.nonNumericColumn(other.name)
         }
-        if let mlxResult = NumericEngine.binaryArithmetic(left: leftBuffer, right: rightBuffer, operation: operation) {
-            return Series(name: name, values: mlxResult)
+        if let col = NumericEngine.binaryArithmeticColumn(left: leftBuffer, right: rightBuffer, name: name, operation: operation) {
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
         }
-        let output = (0..<count).map { row -> DataValue in
-            guard !leftBuffer.isMissing[row], !rightBuffer.isMissing[row] else {
-                return .missing
-            }
-            let a = leftBuffer.values[row]
-            let b = rightBuffer.values[row]
+        let lVals = leftBuffer.floatColumn.values
+        let rVals = rightBuffer.floatColumn.values
+        var outVals = ContiguousArray<Double>(repeating: 0.0, count: count)
+        var outNulls = leftBuffer.floatColumn.nullBitmap.bitwiseOr(rightBuffer.floatColumn.nullBitmap)
+        for row in 0..<count where !outNulls[row] {
+            let a = lVals[row]
+            let b = rVals[row]
             let result: Double
             switch operation {
             case .add: result = a + b
             case .subtract: result = a - b
             case .multiply: result = a * b
             case .divide:
-                guard b != 0 else { return .missing }
+                guard b != 0 else {
+                    outNulls[row] = true
+                    continue
+                }
                 result = a / b
             }
-            return result.isFinite ? .number(result) : .missing
+            if result.isFinite {
+                outVals[row] = result
+            } else {
+                outNulls[row] = true
+            }
         }
-        return Series(name: name, values: output)
+        let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+        return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
     }
 
+    /// Returns a series made by adding corresponding elements of two series.
+    ///
+    /// - Throws: An error if the series differ in length or contain non-numeric values.
     public static func + (lhs: Series, rhs: Series) throws -> Series {
         try lhs.applying(.add, other: rhs)
     }
 
+    /// Returns a series made by subtracting corresponding elements of two series.
+    ///
+    /// - Throws: An error if the series differ in length or contain non-numeric values.
     public static func - (lhs: Series, rhs: Series) throws -> Series {
         try lhs.applying(.subtract, other: rhs)
     }
 
+    /// Returns a series made by multiplying corresponding elements of two series.
+    ///
+    /// - Throws: An error if the series differ in length or contain non-numeric values.
     public static func * (lhs: Series, rhs: Series) throws -> Series {
         try lhs.applying(.multiply, other: rhs)
     }
 
+    /// Returns a series made by dividing corresponding elements of two series.
+    ///
+    /// - Throws: An error if the series differ in length or contain non-numeric values.
     public static func / (lhs: Series, rhs: Series) throws -> Series {
         try lhs.applying(.divide, other: rhs)
     }
 
+    /// Returns a series made by adding a scalar to every element.
+    ///
+    /// - Throws: An error if the series contains non-numeric values.
     public static func + (lhs: Series, rhs: Double) throws -> Series {
         try lhs.applying(.add, scalar: rhs)
     }
 
+    /// Returns a series made by subtracting a scalar from every element.
+    ///
+    /// - Throws: An error if the series contains non-numeric values.
     public static func - (lhs: Series, rhs: Double) throws -> Series {
         try lhs.applying(.subtract, scalar: rhs)
     }
 
+    /// Returns a series made by multiplying every element by a scalar (`rhs`).
+    ///
+    /// - Throws: An error if the series contains non-numeric values.
     public static func * (lhs: Series, rhs: Double) throws -> Series {
         try lhs.applying(.multiply, scalar: rhs)
     }
 
+    /// Returns a series made by dividing every element by a scalar (`rhs`).
+    ///
+    /// - Throws: An error if the series contains non-numeric values.
     public static func / (lhs: Series, rhs: Double) throws -> Series {
         try lhs.applying(.divide, scalar: rhs)
     }
@@ -526,16 +746,52 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         if case .number(let n) = replacement, !n.isFinite {
             throw DataFrameError.nonFiniteValue(column: name, row: 0)
         }
+        if !storage.hasNulls || replacement == .missing {
+            return self
+        }
+        if let buffer = numericBuffer, case .number(let n) = replacement {
+            var outVals = buffer.floatColumn.values
+            let nulls = buffer.floatColumn.nullBitmap
+            for i in 0..<outVals.count where nulls[i] {
+                outVals[i] = n
+            }
+            let col = Float64Column(name: name, values: outVals, nullBitmap: BitSet(count: outVals.count))
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
+        }
         return Series(name: name, values: values.map { $0 == .missing ? replacement : $0 })
     }
 
     /// Returns a copy with `.missing` elements removed.
     public func dropMissing() -> Series {
-        Series(name: name, values: values.filter { $0 != .missing })
+        if !storage.hasNulls {
+            return self
+        }
+        let filteredStorage = storage.slice(mask: storage.nullBitmap.inverted())
+        return Series(storage: filteredStorage)
     }
 
     /// Returns a copy where `.missing` elements are filled with the closest earlier non-missing value.
     public func forwardFilled() -> Series {
+        if !storage.hasNulls {
+            return self
+        }
+        if let buffer = numericBuffer {
+            var outVals = buffer.floatColumn.values
+            var outNulls = buffer.floatColumn.nullBitmap
+            var last: Double?
+            for i in 0..<outVals.count {
+                if outNulls[i] {
+                    if let last {
+                        outVals[i] = last
+                        outNulls[i] = false
+                    }
+                } else {
+                    last = outVals[i]
+                }
+            }
+            let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
+        }
         var last: DataValue = .missing
         return Series(name: name, values: values.map { value in
             if value == .missing { return last }
@@ -546,6 +802,26 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
     /// Returns a copy where `.missing` elements are filled with the closest later non-missing value.
     public func backwardFilled() -> Series {
+        if !storage.hasNulls {
+            return self
+        }
+        if let buffer = numericBuffer {
+            var outVals = buffer.floatColumn.values
+            var outNulls = buffer.floatColumn.nullBitmap
+            var next: Double?
+            for i in (0..<outVals.count).reversed() {
+                if outNulls[i] {
+                    if let next {
+                        outVals[i] = next
+                        outNulls[i] = false
+                    }
+                } else {
+                    next = outVals[i]
+                }
+            }
+            let col = Float64Column(name: name, values: outVals, nullBitmap: outNulls)
+            return Series(storage: col, numericBuffer: NumericBuffer(floatColumn: col))
+        }
         var next: DataValue = .missing
         let filled = values.reversed().map { value -> DataValue in
             if value == .missing { return next }
@@ -555,15 +831,19 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         return Series(name: name, values: Array(filled.reversed()))
     }
 
+    /// A pandas-style tabular text representation including name and length.
     public var description: String {
-        let labels = values.indices.map(String.init)
-        let cells = values.map { [DataFrame.displayValue($0)] }
+        let vals = values
+        let labels = vals.indices.map(String.init)
+        let cells = vals.map { [DataFrame.displayValue($0)] }
         return DataFrame.renderTable(rowLabels: labels, columnNames: [name], values: cells)
             + "\nName: \(name), Length: \(count)"
     }
 
+    /// A debugging representation; identical to ``description``.
     public var debugDescription: String { description }
 
+    /// Writes ``description`` to the given output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -573,11 +853,12 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 public enum CumulativeFunction: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
     case sum, product, minimum, maximum
 
+    /// The lowercase name of the function.
     public var description: String { rawValue }
 }
 
 extension DataFrame {
-    /// Returns one column as a ``Series``.
+    /// Returns one column as a ``Series`` in $O(1)$ without unboxing column storage.
     public func series(_ name: String) throws -> Series {
         guard let column = columns.first(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -590,14 +871,33 @@ extension DataFrame {
         try? series(name)
     }
 
+    /// Returns a copy with a new or replaced column from a ``Series``.
+    public func withColumn(_ series: Series) throws -> DataFrame {
+        try withColumn(storage: series.storage)
+    }
+
+    /// Returns a copy with a new or replaced numeric column from `Double` values.
+    public func withColumn(name: String, numbers: [Double]) throws -> DataFrame {
+        for (row, num) in numbers.enumerated() where !num.isFinite {
+            throw DataFrameError.nonFiniteValue(column: name, row: row)
+        }
+        let col = Float64Column(
+            name: name,
+            values: ContiguousArray(numbers),
+            nullBitmap: BitSet(count: numbers.count)
+        )
+        return try withColumn(storage: col)
+    }
+
     /// Returns a copy without the named columns.
     public func drop(columns names: [String]) throws -> DataFrame {
         for name in names where !columnNames.contains(name) {
             throw DataFrameError.columnNotFound(name)
         }
-        let kept = columns.filter { !names.contains($0.name) }
+        let dropped = Set(names)
+        let kept = columns.filter { !dropped.contains($0.name) }
         guard !kept.isEmpty else { throw DataFrameError.emptyColumns }
-        return try DataFrame(columns: kept.map { (name: $0.name, values: $0.values) })
+        return try DataFrame(dataColumns: kept)
     }
 
     /// Returns the `count` rows with the largest values in `column`.
@@ -727,44 +1027,44 @@ extension DataFrame {
     /// CPU stream in `float64`.
     public func cumulative(_ column: String, using function: CumulativeFunction) throws -> DataFrame {
         let updated = try series(column).cumulative(using: function)
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Returns a copy where `column` is shifted down by `periods` rows
     /// (up when negative), filling vacated rows with missing values.
     public func shifted(_ column: String, by periods: Int = 1) throws -> DataFrame {
         let updated = try series(column).shifted(by: periods)
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Returns a copy where `column` holds the difference from `periods` rows earlier.
     public func difference(_ column: String, periods: Int = 1) throws -> DataFrame {
         let updated = try series(column).difference(periods: periods)
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Returns a copy where `column` holds the fractional change from `periods` rows earlier.
     public func percentChange(_ column: String, periods: Int = 1) throws -> DataFrame {
         let updated = try series(column).percentChange(periods: periods)
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Limits numeric values of `column` to `lower...upper`; either bound may be `nil`.
     public func clipped(_ column: String, lower: Double? = nil, upper: Double? = nil) throws -> DataFrame {
         let updated = try series(column).clipped(lower: lower, upper: upper)
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Rounds numeric values of `column` to `decimals` places.
     public func rounded(_ column: String, decimals: Int = 0) throws -> DataFrame {
         let updated = try series(column).rounded(decimals: decimals)
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Replaces a numeric column with the absolute value of each entry.
     public func abs(_ column: String) throws -> DataFrame {
         let updated = try series(column).abs()
-        return try replacingColumn(column, with: updated.values)
+        return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Computes average-tie ranks (1-based) for `column`.
@@ -778,7 +1078,7 @@ extension DataFrame {
     ) throws -> DataFrame {
         let ranks = try series(column).ranked(ascending: ascending)
         let target = outputColumn ?? column
-        return try withColumn(name: target, values: ranks.values)
+        return try withColumn(storage: ranks.storage.renamed(to: target))
     }
 
     /// Combines two numeric columns element-wise with `operation` (+, -, *, /)
@@ -792,7 +1092,7 @@ extension DataFrame {
         let lhs = try series(leftColumn)
         let rhs = try series(rightColumn)
         let combined = try lhs.applying(operation, other: rhs)
-        return try withColumn(name: outputColumn, values: combined.values)
+        return try withColumn(storage: combined.storage.renamed(to: outputColumn))
     }
 
     /// Applies a scalar arithmetic operation to `column` and writes the result
@@ -804,7 +1104,8 @@ extension DataFrame {
         as outputColumn: String? = nil
     ) throws -> DataFrame {
         let updated = try series(column).applying(operation, scalar: scalar)
-        return try withColumn(name: outputColumn ?? column, values: updated.values)
+        let target = outputColumn ?? column
+        return try withColumn(storage: updated.storage.renamed(to: target))
     }
 
     /// Number of distinct non-missing values in each column (similar to `df.nunique()`).
@@ -837,46 +1138,44 @@ extension DataFrame {
             }
         }
         let scope = targetColumns.map(Set.init)
-        return try DataFrame(columns: columns.map { col in
+        let updated: [DataColumn] = columns.map { col in
             guard scope == nil || scope!.contains(col.name) else {
-                return (name: col.name, values: col.values)
+                return col
             }
-            return (
+            return DataColumn(
                 name: col.name,
                 values: col.values.map { $0 == target ? replacement : $0 }
             )
-        })
+        }
+        return try DataFrame(dataColumns: updated)
     }
 
     /// Fills each missing value with the closest earlier non-missing value.
     public func forwardFilled() throws -> DataFrame {
-        try DataFrame(columns: columns.map { column in
-            var last: DataValue = .missing
-            return (name: column.name, values: column.values.map { value in
-                if value == .missing { return last }
-                last = value
-                return value
-            })
-        })
+        let updated = columns.map { column -> DataColumn in
+            guard column.storage.hasNulls else { return column }
+            return DataColumn(storage: Series(column: column).forwardFilled().storage)
+        }
+        return try DataFrame(dataColumns: updated)
     }
 
     /// Fills each missing value with the closest later non-missing value.
     public func backwardFilled() throws -> DataFrame {
-        try DataFrame(columns: columns.map { column in
-            var next: DataValue = .missing
-            let filled = column.values.reversed().map { value -> DataValue in
-                if value == .missing { return next }
-                next = value
-                return value
-            }
-            return (name: column.name, values: Array(filled.reversed()))
-        })
+        let updated = columns.map { column -> DataColumn in
+            guard column.storage.hasNulls else { return column }
+            return DataColumn(storage: Series(column: column).backwardFilled().storage)
+        }
+        return try DataFrame(dataColumns: updated)
     }
 
     /// Returns a Boolean frame that is `true` where the source is missing.
     public func missingMask() throws -> DataFrame {
-        try DataFrame(columns: columns.map { column in
-            (name: column.name, values: column.values.map { DataValue.boolean($0 == .missing) })
+        try DataFrame(storageColumns: columns.map { column in
+            BooleanColumn(
+                name: column.name,
+                bitmap: column.storage.nullBitmap,
+                nullBitmap: BitSet(count: rowCount)
+            )
         })
     }
 
@@ -884,13 +1183,19 @@ extension DataFrame {
     public func infoSummary() -> DataFrameInfo {
         var totalMemory = 0
         let columnInfos = columns.map { column -> DataFrameInfo.Column in
-            let nonMissing = column.values.filter { $0 != .missing }.count
-            for value in column.values {
-                switch value {
-                case .number, .date: totalMemory += 8
-                case .boolean: totalMemory += 1
-                case .string(let s): totalMemory += s.utf8.count
-                case .missing: break
+            let nonMissing = column.storage.count - column.storage.nullCount
+            if column.numericBuffer != nil || column.storage is DateColumn {
+                totalMemory += nonMissing * 8
+            } else if column.storage is BooleanColumn {
+                totalMemory += nonMissing
+            } else {
+                for value in column.values {
+                    switch value {
+                    case .number, .date: totalMemory += 8
+                    case .boolean: totalMemory += 1
+                    case .string(let s): totalMemory += s.utf8.count
+                    case .missing: break
+                    }
                 }
             }
             return DataFrameInfo.Column(
@@ -907,10 +1212,21 @@ extension DataFrame {
     }
 
     func replacingColumn(_ name: String, with values: [DataValue]) throws -> DataFrame {
-        guard columnNames.contains(name) else { throw DataFrameError.columnNotFound(name) }
-        return try DataFrame(columns: columns.map {
-            (name: $0.name, values: $0.name == name ? values : $0.values)
-        })
+        guard let idx = columns.firstIndex(where: { $0.name == name }) else {
+            throw DataFrameError.columnNotFound(name)
+        }
+        var updated = columns
+        updated[idx] = DataColumn(name: name, values: values)
+        return try DataFrame(dataColumns: updated)
+    }
+
+    func replacingColumn(_ name: String, withStorage storage: any AnyColumn) throws -> DataFrame {
+        guard let idx = columns.firstIndex(where: { $0.name == name }) else {
+            throw DataFrameError.columnNotFound(name)
+        }
+        var updated = columns
+        updated[idx] = DataColumn(storage: storage.renamed(to: name))
+        return try DataFrame(dataColumns: updated)
     }
 }
 
@@ -918,10 +1234,14 @@ extension DataFrame {
 public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible, TextOutputStreamable {
     /// Per-column information.
     public struct Column: Equatable, Hashable, Sendable, Codable {
+        /// The column name.
         public let name: String
+        /// The number of non-missing values in the column.
         public let nonMissingCount: Int
+        /// The column's data type.
         public let type: DataType
 
+        /// Creates per-column information.
         public init(name: String, nonMissingCount: Int, type: DataType) {
             self.name = name
             self.nonMissingCount = nonMissingCount
@@ -929,10 +1249,19 @@ public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStrin
         }
     }
 
+    /// The number of rows in the frame.
     public let rowCount: Int
+    /// Per-column information, in column order.
     public let columns: [Column]
+    /// The estimated memory footprint of the frame, in bytes.
     public let estimatedMemoryBytes: Int
 
+    /// Creates a frame information summary.
+    ///
+    /// - Parameters:
+    ///   - rowCount: The number of rows.
+    ///   - columns: Per-column information.
+    ///   - estimatedMemoryBytes: The estimated memory use in bytes.
     public init(
         rowCount: Int,
         columns: [Column],
@@ -943,6 +1272,7 @@ public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStrin
         self.estimatedMemoryBytes = estimatedMemoryBytes
     }
 
+    /// Renders a multi-line summary of the row count and each column's name, non-null count, and type.
     public func describe() -> String {
         var lines = ["DataFrame: \(rowCount) rows x \(columns.count) columns"]
         for (index, column) in columns.enumerated() {
@@ -951,9 +1281,12 @@ public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStrin
         return lines.joined(separator: "\n")
     }
 
+    /// A text summary; equivalent to ``describe()``.
     public var description: String { describe() }
+    /// A debugging representation; identical to ``description``.
     public var debugDescription: String { description }
 
+    /// Writes ``description`` to the given output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }

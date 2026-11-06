@@ -52,3 +52,10 @@ README.ko.md에 README.md의 내용을 그대로 한국어로 번역한 내용�
   - Left Join: **6.95ms** (기존 19.59ms 대비 65% 단축, 약 3배 향상)
   - Describe: **9.42ms**
   - 전체 63개 유닛 테스트 100% 통과
+
+- [x] **6. Phase 7 — Zero-Boxing Columnar ↔ MLX 파이프라인 및 Pandas 고급 API 완성**
+  - `NumericBuffer`를 `Float64Column`(`ContiguousArray<Double>` + `BitSet`)과 직접 통합하여 중복 배열 할당을 제거하고, `Series`를 `any AnyColumn` 기반으로 재설계하여 `[DataValue]` 언박싱 오버헤드 제거.
+  - `DataFrame` 컬럼 교체/추가/선택/이름 변경 시 변경되지 않은 `DataColumn`을 $O(1)$에 재사용.
+  - `RowPredicate` 및 문자열 `query(...)`가 행별 딕셔너리 생성 없이 컬럼 버퍼와 `BitSet`을 직접 스캔하도록 최적화.
+  - MLX 그래프 융합(`fusedMoments()` 단일 `MLX.eval`), 2D `MLX.asStrided` 롤링 윈도우, `ExecutionPolicy.gpuFloat32` Metal GPU 가속 정책, 단항 초월함수/거듭제곱 MLX 커널 추가.
+  - `BooleanMask` 벡터화 불리언 인덱싱(`df[mask]`), `where`, `interpolated`, `binned`(`cut`), `quantileBinned`(`qcut`), `standardized`, `minMaxScaled`, `exponentiallyWeighted`(`ewm`), `pivoted`(`pivot`), `crossTabulated`(`crosstab`), `oneHotEncoded`(`get_dummies`), `GroupedDataFrame.filter`, `Aggregation(..., as:)`, `joinAsOf`(`merge_asof`), `resample`, `SeriesDescription`, `QuantileTable` 등 Pandas 고급 기능 및 구조체 결과 타입 완비 (전체 66개 유닛 테스트 100% 통과).

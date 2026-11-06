@@ -1,5 +1,102 @@
 import Foundation
 
+private struct CSVColumnBuilder {
+    let name: String
+    let explicitType: DataType?
+    let infersNumbers: Bool
+    private(set) var isNumeric: Bool
+    private var numbers: ContiguousArray<Double> = []
+    private var nullIndices: [Int] = []
+    private var boxed: [DataValue] = []
+
+    init(name: String, explicitType: DataType?, infersNumbers: Bool, estimatedRows: Int) {
+        self.name = name
+        self.explicitType = explicitType
+        self.infersNumbers = infersNumbers
+        if explicitType == .number || (explicitType == nil && infersNumbers) {
+            self.isNumeric = true
+            self.numbers.reserveCapacity(estimatedRows)
+        } else {
+            self.isNumeric = false
+            self.boxed.reserveCapacity(estimatedRows)
+        }
+    }
+
+    mutating func appendNumber(_ number: Double) {
+        if isNumeric {
+            numbers.append(number)
+        } else {
+            boxed.append(.number(number))
+        }
+    }
+
+    mutating func appendMissing() {
+        if isNumeric {
+            nullIndices.append(numbers.count)
+            numbers.append(0.0)
+        } else {
+            boxed.append(.missing)
+        }
+    }
+
+    mutating func appendValue(_ value: DataValue) {
+        if isNumeric {
+            switch value {
+            case .number(let number):
+                numbers.append(number)
+                return
+            case .missing:
+                nullIndices.append(numbers.count)
+                numbers.append(0.0)
+                return
+            default:
+                demoteToBoxed()
+            }
+        }
+        boxed.append(value)
+    }
+
+    private mutating func demoteToBoxed() {
+        guard isNumeric else { return }
+        isNumeric = false
+        var converted = [DataValue]()
+        converted.reserveCapacity(numbers.count + 16)
+        let nullSet = Set(nullIndices)
+        for i in 0..<numbers.count {
+            if nullSet.contains(i) {
+                converted.append(.missing)
+            } else {
+                converted.append(.number(numbers[i]))
+            }
+        }
+        numbers.removeAll(keepingCapacity: false)
+        nullIndices.removeAll(keepingCapacity: false)
+        boxed = converted
+    }
+
+    func finish() -> DataColumn {
+        if isNumeric {
+            let n = numbers.count
+            if nullIndices.count == n && explicitType == nil {
+                return DataColumn(
+                    storage: AnyValueColumn(
+                        name: name,
+                        dataValues: ContiguousArray(repeating: .missing, count: n),
+                        nullBitmap: BitSet(count: n, repeating: true)
+                    )
+                )
+            }
+            var bm = BitSet(count: n)
+            for idx in nullIndices {
+                bm[idx] = true
+            }
+            let floatCol = Float64Column(name: name, values: numbers, nullBitmap: bm)
+            return DataColumn(storage: floatCol)
+        }
+        return DataColumn(name: name, values: boxed)
+    }
+}
+
 extension DataFrame {
     /// Loads a CSV file, using the first record as its column names.
     public init(
@@ -18,7 +115,7 @@ extension DataFrame {
     /// Records are read incrementally, so `maximumRows` stops file processing
     /// after the requested number of data records.
     public init(contentsOfCSV url: URL, options: CSVReadOptions) throws {
-        try self.init(columns: Self.readCSV(url, options: options))
+        try self.init(dataColumns: Self.readCSVColumns(url, options: options))
     }
 
     /// Writes the frame as UTF-8 CSV. Missing values are written as empty fields.
@@ -68,7 +165,7 @@ extension DataFrame {
             }
             for row in 0..<rowCount {
                 try file.write(contentsOf: encodedRecord(columns.map { column in
-                    switch column.values[row] {
+                    switch column.storage.value(at: row) {
                     case .number(let number): String(number)
                     case .string(let string): string
                     case .boolean(let value): String(value)
@@ -161,7 +258,7 @@ extension DataFrame {
             var object: [String: Any] = [:]
             object.reserveCapacity(columns.count)
             for column in columns {
-                switch column.values[row] {
+                switch column.storage.value(at: row) {
                 case .number(let number):
                     object[column.name] = number
                 case .string(let string):
@@ -225,10 +322,10 @@ extension DataFrame {
         return .string(String(describing: raw))
     }
 
-    private static func readCSV(
+    private static func readCSVColumns(
         _ url: URL,
         options: CSVReadOptions
-    ) throws -> [(name: String, values: [DataValue])] {
+    ) throws -> [DataColumn] {
         if let maximumRows = options.maximumRows, maximumRows < 0 {
             throw DataFrameError.invalidCSV("maximumRows cannot be negative")
         }
@@ -246,7 +343,7 @@ extension DataFrame {
         var names: [String]?
         var selectedNames: [String] = []
         var selectedIndices: [Int] = []
-        var values: [[DataValue]] = []
+        var builders: [CSVColumnBuilder] = []
         var dataRowCount = 0
         var recordNumber = 0
         var recordBytes: [UInt8] = []
@@ -321,10 +418,13 @@ extension DataFrame {
                 }
                 names = resolvedNames
                 let estimatedRows = options.maximumRows ?? (fileSize > 0 ? max(100, Int(fileSize / 40)) : 100)
-                values = (0..<selectedNames.count).map { _ in
-                    var col = [DataValue]()
-                    col.reserveCapacity(estimatedRows)
-                    return col
+                builders = selectedNames.map { colName in
+                    CSVColumnBuilder(
+                        name: colName,
+                        explicitType: options.columnTypes[colName],
+                        infersNumbers: options.infersNumbers,
+                        estimatedRows: estimatedRows
+                    )
                 }
 
                 if !options.hasHeader {
@@ -349,15 +449,28 @@ extension DataFrame {
             let canAppendRow = options.maximumRows.map { dataRowCount < $0 } ?? true
             if canAppendRow {
                 for (outputIndex, sourceIndex) in selectedIndices.enumerated() {
-                    values[outputIndex].append(
-                        try Self.inferValue(
-                            record[sourceIndex],
-                            missingTokens: options.missingTokens,
-                            infersNumbers: options.infersNumbers,
-                            columnType: options.columnTypes[selectedNames[outputIndex]],
-                            dateFormat: options.dateFormat
-                        )
+                    let rawSub = record[sourceIndex]
+                    if builders[outputIndex].isNumeric, builders[outputIndex].explicitType == nil {
+                        var sub = rawSub
+                        while let first = sub.first, first.isWhitespace { sub.removeFirst() }
+                        while let last = sub.last, last.isWhitespace { sub.removeLast() }
+                        if sub.isEmpty, options.missingTokens.contains("") {
+                            builders[outputIndex].appendMissing()
+                            continue
+                        }
+                        if let number = Double(sub), number.isFinite {
+                            builders[outputIndex].appendNumber(number)
+                            continue
+                        }
+                    }
+                    let inferred = try Self.inferValue(
+                        rawSub,
+                        missingTokens: options.missingTokens,
+                        infersNumbers: options.infersNumbers,
+                        columnType: builders[outputIndex].explicitType,
+                        dateFormat: options.dateFormat
                     )
+                    builders[outputIndex].appendValue(inferred)
                 }
                 dataRowCount += 1
             }
@@ -433,7 +546,7 @@ extension DataFrame {
         }
 
         guard names != nil else { throw DataFrameError.emptyColumns }
-        return Array(zip(selectedNames, values)).map { (name: $0.0, values: $0.1) }
+        return builders.map { $0.finish() }
     }
 
     private static func inferValue(
