@@ -6,6 +6,8 @@
 
 `DataFrame`, `Series`, `DataRow`와 모든 요약/통계 결과 타입은 불변(immutable) 값 타입(`Sendable`, `Equatable`, `Hashable`, `Codable`)으로 설계되었으며 `print(...)`에 전달하면 pandas 스타일의 표와 요약 텍스트를 출력합니다. 또한 대규모 수치형 컬럼에 대해 [MLX Swift](https://github.com/ml-explore/mlx-swift)를 벡터화 수치 엔진으로 사용하여(기본적으로 MLX CPU 스트림의 `float64`, `ExecutionPolicy.gpu` 지정 시 GPU 스트림의 `float32`) 축소 연산, 그룹별 집계, 윈도우 함수, 원소별 사칙연산, 공분산/상관계수 행렬 계산을 가속하며, 소규모 입력이거나 Metal 라이브러리를 사용할 수 없는 환경에서는 네이티브 Swift로 자동 폴백(fallback)합니다.
 
+데모 프로젝트는 다음 저장소를 참고하세요. [Bandal-demo](https://github.com/NeuroAssociates/Bandal-demo)
+
 ---
 
 ## 주요 특징
