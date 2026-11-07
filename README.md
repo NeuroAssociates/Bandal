@@ -6,6 +6,8 @@
 
 `DataFrame`, `Series`, `DataRow`, and all summary/statistics result types are immutable value types (`Sendable`, `Equatable`, `Hashable`, `Codable`) that render pandas-style text when passed to `print(...)`. For large numeric columns, Bandal accelerates reductions, grouped aggregations, window functions, element-wise arithmetic, and covariance/correlation matrices through [MLX Swift](https://github.com/ml-explore/mlx-swift) (`float64` on the MLX CPU stream by default, or `float32` on the GPU stream via `ExecutionPolicy.gpu`) while automatically falling back to native Swift on small inputs or when the Metal library is unavailable.
 
+For a demo project, see [Bandal-demo](https://github.com/NeuroAssociates/Bandal-demo).
+
 ---
 
 ## Highlights
