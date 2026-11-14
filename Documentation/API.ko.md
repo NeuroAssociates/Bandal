@@ -8,6 +8,21 @@ Bandal은 Python의 [pandas](https://pandas.pydata.org/)에서 영감을 받아 
 
 ---
 
+## 주제별 독학 가이드 (`Documentation/Guides/`)
+
+`pandas`와의 1:1 비교 표 및 단계별 실습 예제 코드는 아래 8개의 독학 가이드를 참고하세요:
+
+1. [가이드 01: 핵심 데이터 구조 및 Swift 값 타입 모델](Guides/01-Core-Data-Structures.ko.md) ([English](Guides/01-Core-Data-Structures.md))
+2. [가이드 02: 데이터 입출력(CSV & JSON) 및 스키마 탐색](Guides/02-Data-IO-and-Inspection.ko.md) ([English](Guides/02-Data-IO-and-Inspection.md))
+3. [가이드 03: 인덱싱, 슬라이싱, 불리언 마스크 및 쿼리](Guides/03-Indexing-Filtering-and-Querying.ko.md) ([English](Guides/03-Indexing-Filtering-and-Querying.md))
+4. [가이드 04: 데이터 정제, 결측치 처리 및 피처 엔지니어링](Guides/04-Cleaning-and-Feature-Engineering.ko.md) ([English](Guides/04-Cleaning-and-Feature-Engineering.md))
+5. [가이드 05: 벡터화 수학 연산, 누적 함수 및 기술 통계](Guides/05-Vectorized-Math-and-Statistics.ko.md) ([English](Guides/05-Vectorized-Math-and-Statistics.md))
+6. [가이드 06: 그룹 집계(`groupBy`), 관계형 조인 및 재구조화](Guides/06-Grouping-Joining-and-Reshaping.ko.md) ([English](Guides/06-Grouping-Joining-and-Reshaping.md))
+7. [가이드 07: 시계열 데이터 분석 및 윈도우 함수](Guides/07-Time-Series-and-Window-Functions.ko.md) ([English](Guides/07-Time-Series-and-Window-Functions.md))
+8. [가이드 08: MLX 가속 엔진, 실행 정책 제어 및 실전 종합 워크플로우](Guides/08-MLX-Acceleration-and-Workflows.ko.md) ([English](Guides/08-MLX-Acceleration-and-Workflows.md))
+
+---
+
 ## 목차
 
 1. [데이터 모델 (`DataFrame`, `Series`, `DataRow`, `DataValue`, `DataType`)](#1-데이터-모델)

@@ -1,6 +1,6 @@
 # Bandal
 
-[English](README.md) · [API 레퍼런스](Documentation/API.ko.md) · [API Reference](Documentation/API.md)
+[English](README.md) · [API 레퍼런스](Documentation/API.ko.md) · [API Reference](Documentation/API.md) · [독학 가이드](Documentation/Guides/01-Core-Data-Structures.ko.md) · [Self-Study Guides](Documentation/Guides/01-Core-Data-Structures.md)
 
 **Bandal**은 Python의 [pandas](https://pandas.pydata.org/)에서 영감을 받아 [Swift API Design Guidelines](https://www.swift.org/documentation/api-design-guidelines/)에 따라 설계된 테이블형 데이터 분석용 Swift 패키지입니다.
 
@@ -180,10 +180,21 @@ let restored = try DataFrame(mlxColumns: [(name: "revenue", vector: vector)])
 
 ## 문서
 
+### API 레퍼런스 및 프로젝트 문서
 - [한국어 API 레퍼런스 (`Documentation/API.ko.md`)](Documentation/API.ko.md)
 - [영어 API 레퍼런스 (`Documentation/API.md`)](Documentation/API.md)
 - [기여 가이드 (`CONTRIBUTING.md`)](CONTRIBUTING.md)
 - [변경 로그 (`CHANGELOG.md`)](CHANGELOG.md)
+
+### `pandas` 사용자를 위한 주제별 독학 가이드 (`Documentation/Guides/`)
+1. [가이드 01: 핵심 데이터 구조 및 Swift 값 타입 모델](Documentation/Guides/01-Core-Data-Structures.ko.md) ([English](Documentation/Guides/01-Core-Data-Structures.md))
+2. [가이드 02: 데이터 입출력(CSV & JSON) 및 스키마 탐색](Documentation/Guides/02-Data-IO-and-Inspection.ko.md) ([English](Documentation/Guides/02-Data-IO-and-Inspection.md))
+3. [가이드 03: 인덱싱, 슬라이싱, 불리언 마스크 및 쿼리](Documentation/Guides/03-Indexing-Filtering-and-Querying.ko.md) ([English](Documentation/Guides/03-Indexing-Filtering-and-Querying.md))
+4. [가이드 04: 데이터 정제, 결측치 처리 및 피처 엔지니어링](Documentation/Guides/04-Cleaning-and-Feature-Engineering.ko.md) ([English](Documentation/Guides/04-Cleaning-and-Feature-Engineering.md))
+5. [가이드 05: 벡터화 수학 연산, 누적 함수 및 기술 통계](Documentation/Guides/05-Vectorized-Math-and-Statistics.ko.md) ([English](Documentation/Guides/05-Vectorized-Math-and-Statistics.md))
+6. [가이드 06: 그룹 집계(`groupBy`), 관계형 조인 및 재구조화](Documentation/Guides/06-Grouping-Joining-and-Reshaping.ko.md) ([English](Documentation/Guides/06-Grouping-Joining-and-Reshaping.md))
+7. [가이드 07: 시계열 데이터 분석 및 윈도우 함수](Documentation/Guides/07-Time-Series-and-Window-Functions.ko.md) ([English](Documentation/Guides/07-Time-Series-and-Window-Functions.md))
+8. [가이드 08: MLX 가속 엔진, 실행 정책 제어 및 실전 종합 워크플로우](Documentation/Guides/08-MLX-Acceleration-and-Workflows.ko.md) ([English](Documentation/Guides/08-MLX-Acceleration-and-Workflows.md))
 
 ---
 

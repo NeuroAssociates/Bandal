@@ -8,6 +8,21 @@ For numeric workloads, Bandal uses [MLX Swift](https://github.com/ml-explore/mlx
 
 ---
 
+## Self-Study Guides (`Documentation/Guides/`)
+
+For step-by-step tutorials with side-by-side `pandas` comparisons and runnable examples, see the 8-part guide series:
+
+1. [Guide 01: Core Data Structures & Swift Value Semantics](Guides/01-Core-Data-Structures.md) ([한국어](Guides/01-Core-Data-Structures.ko.md))
+2. [Guide 02: Data I/O (CSV & JSON) & Schema Inspection](Guides/02-Data-IO-and-Inspection.md) ([한국어](Guides/02-Data-IO-and-Inspection.ko.md))
+3. [Guide 03: Indexing, Slicing, Boolean Masks & Querying](Guides/03-Indexing-Filtering-and-Querying.md) ([한국어](Guides/03-Indexing-Filtering-and-Querying.ko.md))
+4. [Guide 04: Data Cleaning, Missing Values & Feature Engineering](Guides/04-Cleaning-and-Feature-Engineering.md) ([한국어](Guides/04-Cleaning-and-Feature-Engineering.ko.md))
+5. [Guide 05: Vectorized Math, Cumulative Ops & Structured Statistics](Guides/05-Vectorized-Math-and-Statistics.md) ([한국어](Guides/05-Vectorized-Math-and-Statistics.ko.md))
+6. [Guide 06: Grouping (`groupBy`), Relational Joins & Reshaping](Guides/06-Grouping-Joining-and-Reshaping.md) ([한국어](Guides/06-Grouping-Joining-and-Reshaping.ko.md))
+7. [Guide 07: Time Series Analysis & Window Functions](Guides/07-Time-Series-and-Window-Functions.md) ([한국어](Guides/07-Time-Series-and-Window-Functions.ko.md))
+8. [Guide 08: MLX Acceleration, Runtime Policy & End-to-End Workflows](Guides/08-MLX-Acceleration-and-Workflows.md) ([한국어](Guides/08-MLX-Acceleration-and-Workflows.ko.md))
+
+---
+
 ## Table of Contents
 
 1. [Data Model (`DataFrame`, `Series`, `DataRow`, `DataValue`, `DataType`)](#1-data-model)
