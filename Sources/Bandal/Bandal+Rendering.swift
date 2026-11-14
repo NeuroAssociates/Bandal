@@ -49,11 +49,16 @@ extension DataFrame {
     }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
 
     /// Renders the frame with configurable `RenderOptions`.
+    ///
+    /// - Parameter options: Formatting options controlling row, column, and cell-width truncation.
+    /// - Returns: A formatted plain-text table representation.
     public func render(options: RenderOptions) -> String {
         let visibleRows = Self.visibleIndices(count: rowCount, limit: options.maxRows)
         let visibleColumns = Self.visibleIndices(count: columns.count, limit: options.maxColumns)
@@ -74,11 +79,21 @@ extension DataFrame {
     ///
     /// A limit of zero displays no values along that axis. Negative limits are
     /// treated as zero.
+    ///
+    /// - Parameters:
+    ///   - maxRows: Maximum number of rows to display before inserting an ellipsis. Defaults to `10`.
+    ///   - maxColumns: Maximum number of columns to display before inserting an ellipsis. Defaults to `8`.
+    /// - Returns: A formatted plain-text table representation.
     public func render(maxRows: Int = 10, maxColumns: Int = 8) -> String {
         render(options: RenderOptions(maxRows: maxRows, maxColumns: maxColumns))
     }
 
     /// Renders the frame as a GitHub-flavored Markdown table.
+    ///
+    /// - Parameters:
+    ///   - maxRows: Optional maximum number of rows to include before inserting an ellipsis row.
+    ///   - maxColumns: Optional maximum number of columns to include before inserting an ellipsis column.
+    /// - Returns: A GitHub-flavored Markdown table string.
     public func toMarkdown(maxRows: Int? = nil, maxColumns: Int? = nil) -> String {
         let rowLimit = maxRows ?? rowCount
         let colLimit = maxColumns ?? columns.count
@@ -102,6 +117,8 @@ extension DataFrame {
     ///
     /// The estimates count numeric payloads as eight bytes and strings by their
     /// UTF-8 byte length; they exclude Swift collection and object overhead.
+    ///
+    /// - Returns: A multi-line summary of the frame's schema and payload size.
     public func info() -> String {
         let nameWidth = max("Column".count, columns.map(\.name.count).max() ?? 0)
         let countHeader = "Non-Null Count"
@@ -162,6 +179,11 @@ extension DataFrame {
     ///
     /// This method delegates to `describeStructured(percentiles:include:).describe()`
     /// so that callers can also inspect the result as a Swift object before rendering text.
+    ///
+    /// - Parameters:
+    ///   - percentiles: Fractional probabilities in `0...1` to include in numeric summaries. Defaults to `[0.25, 0.5, 0.75]`.
+    ///   - include: Optional set of ``DataType`` values to include; `nil` includes all columns.
+    /// - Returns: A formatted descriptive-statistics table string.
     public func describe(
         percentiles: [Double] = [0.25, 0.5, 0.75],
         include: Set<DataType>? = nil
@@ -169,18 +191,21 @@ extension DataFrame {
         describeStructured(percentiles: percentiles, include: include).describe()
     }
 
+    /// Truncates `value` to `limit` characters, appending an ellipsis (`…`) when shortened.
     private static func truncate(_ value: String, limit: Int?) -> String {
         guard let limit, limit > 0, value.count > limit else { return value }
         if limit == 1 { return "…" }
         return String(value.prefix(limit - 1)) + "…"
     }
 
+    /// Escapes pipe characters and newlines for safe Markdown table cell rendering.
     private static func escapeMarkdown(_ value: String) -> String {
         value
             .replacingOccurrences(of: "|", with: "\\|")
             .replacingOccurrences(of: "\n", with: " ")
     }
 
+    /// Computes the sequence of visible indices (with `nil` representing an ellipsis gap) for `count` items under `limit`.
     private static func visibleIndices(count: Int, limit: Int) -> [Int?] {
         let limit = max(limit, 0)
         guard count > limit else { return Array((0..<count).map(Optional.some)) }
@@ -195,6 +220,7 @@ extension DataFrame {
             + Array(((count - trailingCount)..<count).map(Optional.some))
     }
 
+    /// Returns the Pandas-style dtype label (`"float64"`, `"object"`, `"bool"`, `"datetime"`, `"mixed"`, or `"unknown"`) for `column`.
     private static func dataType(of column: DataColumn) -> String {
         let types = Set(column.values.compactMap { value -> DataType? in
             switch value {
@@ -217,6 +243,7 @@ extension DataFrame {
         }
     }
 
+    /// Formats a ``DataValue`` for human-readable table cells.
     static func displayValue(_ value: DataValue) -> String {
         switch value {
         case .number(let number):
@@ -232,6 +259,7 @@ extension DataFrame {
         }
     }
 
+    /// Renders a plain-text aligned table from row labels, column headers, and cell strings.
     static func renderTable(
         rowLabels: [String],
         columnNames: [String],
@@ -264,11 +292,15 @@ extension DataFrame {
         return ([header] + body).joined(separator: "\n")
     }
 
+    /// Horizontal text alignment within a fixed-width table column.
     private enum TextAlignment {
+        /// Left-aligned text padded with trailing spaces.
         case left
+        /// Right-aligned text padded with leading spaces.
         case right
     }
 
+    /// Pads `value` with spaces to `width` using `alignment`.
     private static func padded(
         _ value: String,
         to width: Int,
@@ -289,6 +321,8 @@ extension DataFrameDescription {
     ///
     /// The output format matches `DataFrame.describe()` so existing callers
     /// see identical text while gaining programmatic access to the result.
+    ///
+    /// - Returns: A formatted descriptive-statistics table string.
     public func describe() -> String {
         let statistics = ["count", "mean", "std", "min"]
             + percentileLabels
@@ -307,6 +341,7 @@ extension DataFrameDescription {
         )
     }
 
+    /// Formats a single statistic cell for `columnName` in `description`.
     private static func describeValue(
         _ statistic: String,
         for columnName: String,

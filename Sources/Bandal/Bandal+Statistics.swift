@@ -8,6 +8,8 @@ extension DataFrame {
     /// results keep `Double` precision; small columns use native Swift. See
     /// ``statistics()`` for quartiles, ``summaryTable()`` for an ordered struct
     /// result, and ``describeStructured(percentiles:include:)`` for text output.
+    ///
+    /// - Returns: A dictionary mapping each numeric column name to its ``ColumnSummary``.
     public func summary() -> [String: ColumnSummary] {
         Dictionary(
             uniqueKeysWithValues: columns.compactMap { column in
@@ -59,6 +61,14 @@ extension DataFrame {
     /// accumulator (sequential scans are memory-bound, so MLX is not used) and
     /// large non-null `min`, `max`, `variance`, and `standardDeviation` via
     /// 2D strided MLX reductions (`MLX.asStrided`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to aggregate.
+    ///   - window: Positive trailing window length in rows.
+    ///   - minPeriods: Minimum number of observations in a window required to produce a value; defaults to `window`.
+    ///   - operation: The ``AggregateFunction`` to compute over each window.
+    /// - Returns: A new ``DataFrame`` with the rolling aggregation column appended.
+    /// - Throws: ``DataFrameError`` if `window` or `minPeriods` is invalid, `column` is missing or non-numeric, or the output column name conflicts.
     public func rolling(
         _ column: String,
         window: Int,
@@ -137,6 +147,14 @@ extension DataFrame {
     /// For each row `i` with timestamp `t_i`, the window includes every row `j <= i`
     /// whose timestamp `t_j` falls in `(t_i - interval, t_i]`. Rows with a
     /// missing timestamp in `dateColumn` receive `.missing`.
+    ///
+    /// - Parameters:
+    ///   - valueColumn: Name of the numeric column to aggregate.
+    ///   - dateColumn: Name of the `.date` column defining window timestamps.
+    ///   - interval: Positive trailing time interval in seconds.
+    ///   - operation: The ``AggregateFunction`` to compute over each time window.
+    /// - Returns: A new ``DataFrame`` with the time-based rolling column appended.
+    /// - Throws: ``DataFrameError`` if `interval` is not positive/finite, columns are missing or have invalid types, or the output name conflicts.
     public func rolling(
         _ valueColumn: String,
         on dateColumn: String,
@@ -208,6 +226,12 @@ extension DataFrame {
     ///
     /// Native `count`, `sum`, `mean`, `min`, `max`, `first`, and `last` run in
     /// O(n); `median`, `variance`, and `standardDeviation` are O(n²).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to aggregate.
+    ///   - operation: The ``AggregateFunction`` to evaluate over each prefix `0...row`.
+    /// - Returns: A new ``DataFrame`` with the expanding aggregation column appended.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric, or the output column name conflicts.
     public func expanding(
         _ column: String,
         using operation: AggregateFunction
@@ -288,11 +312,15 @@ extension DataFrame {
     /// Neumaier-compensated running sum so add/subtract sliding windows stay
     /// accurate when large and small magnitudes mix.
     private struct CompensatedSum {
+        /// Running uncompensated sum.
         var sum = 0.0
+        /// Running low-order compensation term.
         var compensation = 0.0
 
+        /// Compensated total (`sum + compensation`).
         var value: Double { sum + compensation }
 
+        /// Incorporates `x` into the compensated sum.
         @inline(__always)
         mutating func add(_ x: Double) {
             let t = sum + x
@@ -408,6 +436,7 @@ extension DataFrame {
         return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
     }
 
+    /// Aggregates the numeric values within `values[range]` using `operation`.
     func aggregateWindow(
         _ values: [DataValue],
         range: Range<Int>,

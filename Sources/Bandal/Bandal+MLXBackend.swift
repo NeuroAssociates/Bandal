@@ -8,9 +8,13 @@ import Metal
 
 /// Arithmetic operators supported by vectorized column and series operations.
 public enum ArithmeticOperator: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Element-wise addition (`+`).
     case add = "+"
+    /// Element-wise subtraction (`-`).
     case subtract = "-"
+    /// Element-wise multiplication (`*`).
     case multiply = "*"
+    /// Element-wise division (`/`).
     case divide = "/"
 
     /// The raw string value of the case.
@@ -20,14 +24,23 @@ public enum ArithmeticOperator: String, Hashable, Sendable, Codable, CaseIterabl
 /// Unary mathematical and transcendental functions supported by vectorized
 /// column and series operations.
 public enum UnaryMathFunction: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Non-negative square root ($\sqrt{x}$).
     case sqrt
+    /// Natural exponential ($e^x$).
     case exp
+    /// Natural logarithm ($\ln(x)$).
     case log
+    /// Base-10 logarithm ($\log_{10}(x)$).
     case log10
+    /// Natural logarithm of $1 + x$ ($\ln(1 + x)$), accurate for small $x$.
     case log1p
+    /// Trigonometric sine ($\sin(x)$) in radians.
     case sin
+    /// Trigonometric cosine ($\cos(x)$) in radians.
     case cos
+    /// Trigonometric tangent ($\tan(x)$) in radians.
     case tan
+    /// Numeric sign (`-1.0` for negative, `0.0` for zero, `1.0` for positive).
     case sign
 
     /// The raw string value of the case.
@@ -37,7 +50,7 @@ public enum UnaryMathFunction: String, Hashable, Sendable, Codable, CaseIterable
 /// Where numeric kernels execute.
 ///
 /// Scope a policy for a call tree with
-/// ``BandalRuntime/withExecutionPolicy(_:operation:)`` without mutating global
+/// ``BandalRuntime/withExecutionPolicy(_:operation:)-17sk0`` without mutating global
 /// MLX device state.
 public enum ExecutionPolicy: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
     /// Use MLX (`float64` on the CPU stream) when it is available and the input
@@ -84,6 +97,7 @@ enum MLXBackend {
     /// Smallest element count at which `ExecutionPolicy.automatic` uses MLX for heavier kernels (moments/sort/matmul/rolling).
     static let automaticComplexMinimumCount = 1_024
 
+    /// Task-local execution policy (`ExecutionPolicy.automatic` by default).
     @TaskLocal static var policy: ExecutionPolicy = .automatic
 
     /// Whether MLX can be used in this process. Computed once.
@@ -109,6 +123,7 @@ enum MLXBackend {
         }
     }
 
+    /// Returns `true` when the active execution policy selects MLX for `elementCount` elements.
     static func shouldUse(elementCount: Int, minimumCount: Int = automaticMinimumCount) -> Bool {
         guard isAvailable, elementCount > 0 else { return false }
         switch policy {
@@ -121,6 +136,7 @@ enum MLXBackend {
         }
     }
 
+    /// Returns `true` when `values` can execute on the Metal GPU stream in `Float32` under the active policy.
     static func shouldUseFloat32GPU(for values: [Double], maxMagnitude: Double = 1e6) -> Bool {
         switch policy {
         case .gpu:
@@ -142,6 +158,7 @@ enum MLXBackend {
         }
     }
 
+    /// Returns `true` when contiguous `values` can execute on the Metal GPU stream in `Float32` under the active policy.
     static func shouldUseFloat32GPU(for values: ContiguousArray<Double>, maxMagnitude: Double = 1e6) -> Bool {
         switch policy {
         case .gpu:
@@ -189,6 +206,7 @@ enum MLXBackend {
         }
     }
 
+    /// Returns `true` when every value in contiguous `values` is finite and losslessly representable as `Float32`.
     static func isExactFloat32(_ values: ContiguousArray<Double>) -> Bool {
         values.withUnsafeBufferPointer { buf in
             guard let base = buf.baseAddress else { return true }
@@ -204,6 +222,7 @@ enum MLXBackend {
         }
     }
 
+    /// Converts an array of `Double` values to a 1-D `Float32` `MLXArray` using `vDSP_vdpsp`.
     static func makeFloat32Array(_ values: [Double]) -> MLXArray {
         let count = values.count
         let floats = ContiguousArray<Float>(unsafeUninitializedCapacity: count) { outBuf, initCount in
@@ -216,6 +235,7 @@ enum MLXBackend {
         return floats.withUnsafeBytes { MLXArray($0, [count], type: Float.self) }
     }
 
+    /// Converts a contiguous array of `Double` values to a 1-D `Float32` `MLXArray` using `vDSP_vdpsp`.
     static func makeFloat32Array(_ values: ContiguousArray<Double>) -> MLXArray {
         let count = values.count
         let floats = ContiguousArray<Float>(unsafeUninitializedCapacity: count) { outBuf, initCount in
@@ -228,8 +248,10 @@ enum MLXBackend {
         return floats.withUnsafeBytes { MLXArray($0, [count], type: Float.self) }
     }
 
+    /// Name of the SwiftPM Cmlx resource bundle containing `default.metallib`.
     private static let bundleName = "mlx-swift_Cmlx"
 
+    /// Detects whether Metal and the MLX shader library are available in the current process.
     private static func detectAvailability() -> Bool {
         if ProcessInfo.processInfo.environment["BANDAL_DISABLE_MLX"] == "1" {
             return false
@@ -242,6 +264,7 @@ enum MLXBackend {
         #endif
     }
 
+    /// Checks whether `default.metallib` or `mlx.metallib` exists in any location searched by MLX.
     private static func metallibIsDiscoverable() -> Bool {
         let fileManager = FileManager.default
 
@@ -279,6 +302,7 @@ enum MLXBackend {
         return false
     }
 
+    /// Resolves the directory containing the currently loaded binary image via `dladdr`.
     private static func currentBinaryDirectory() -> URL? {
         var info = Dl_info()
         let marker: @convention(c) () -> Void = {}
@@ -303,6 +327,10 @@ public struct MLXVector: Equatable, Hashable, Sendable, Codable, CustomStringCon
     public var nonMissingCount: Int { isMissing.filter { !$0 }.count }
 
     /// Creates an `MLXVector` from `Double` values and an optional missing mask.
+    ///
+    /// - Parameters:
+    ///   - values: Underlying `Double` values in row order.
+    ///   - isMissing: Optional missing-value mask matching `values.count`.
     public init(values: [Double], isMissing: [Bool]? = nil) {
         self.values = values
         if let isMissing, isMissing.count == values.count {
@@ -314,6 +342,8 @@ public struct MLXVector: Equatable, Hashable, Sendable, Codable, CustomStringCon
 
     /// Creates an `MLXVector` from an array of `DataValue` cells, returning
     /// `nil` if any cell is non-numeric and non-missing.
+    ///
+    /// - Parameter dataValues: Source ``DataValue`` elements.
     public init?(dataValues: [DataValue]) {
         guard let buffer = NumericBuffer(dataValues: dataValues) else { return nil }
         self.values = buffer.values
@@ -321,12 +351,16 @@ public struct MLXVector: Equatable, Hashable, Sendable, Codable, CustomStringCon
     }
 
     /// Converts the vector back to `[DataValue]`, preserving `.missing` cells.
+    ///
+    /// - Returns: An array of ``DataValue`` elements.
     public func toDataValues() -> [DataValue] {
         NumericBuffer.toDataValues(numbers: values, isMissing: isMissing)
     }
 
     /// Creates a 1-D `MLXArray` (`float64` on CPU stream) when MLX is available
     /// in the current process.
+    ///
+    /// - Returns: A 1-D `MLXArray`, or `nil` if MLX is unavailable.
     public func makeMLXArray() -> MLXArray? {
         guard MLXBackend.isAvailable else { return nil }
         return Self.makeArray(values)
@@ -341,18 +375,23 @@ public struct MLXVector: Equatable, Hashable, Sendable, Codable, CustomStringCon
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
 
+    /// Wraps `[Double]` in a 1-D `float64` `MLXArray`.
     static func makeArray(_ values: [Double]) -> MLXArray {
         values.withUnsafeBytes { MLXArray($0, [values.count], type: Double.self) }
     }
 
+    /// Wraps `ContiguousArray<Double>` in a 1-D `float64` `MLXArray`.
     static func makeArray(_ values: ContiguousArray<Double>) -> MLXArray {
         values.withUnsafeBytes { MLXArray($0, [values.count], type: Double.self) }
     }
 
+    /// Wraps `[Double]` in a 2-D `[rows, columns]` `float64` `MLXArray`.
     static func makeMatrix(_ values: [Double], rows: Int, columns: Int) -> MLXArray {
         values.withUnsafeBytes { MLXArray($0, [rows, columns], type: Double.self) }
     }
@@ -365,10 +404,14 @@ public struct MLXVector: Equatable, Hashable, Sendable, Codable, CustomStringCon
 /// Created only when the dispatch policy selects MLX, so every caller keeps a
 /// native fallback for `nil`.
 struct MLXDeviceVector {
+    /// Underlying 1-D `MLXArray`.
     let array: MLXArray
+    /// Whether `array` uses `Float32` on the Metal GPU stream.
     let usesFloat32GPU: Bool
+    /// Number of elements in `array`.
     let count: Int
 
+    /// Creates a device vector from `[Double]` when the active policy selects MLX.
     init?(_ values: [Double], minimumCount: Int = MLXBackend.automaticMinimumCount) {
         guard MLXBackend.shouldUse(elementCount: values.count, minimumCount: minimumCount) else {
             return nil
@@ -391,6 +434,7 @@ struct MLXDeviceVector {
         self.count = values.count
     }
 
+    /// Creates a device vector from `ContiguousArray<Double>` when the active policy selects MLX.
     init?(_ values: ContiguousArray<Double>, minimumCount: Int = MLXBackend.automaticMinimumCount, assumeFinite: Bool = false) {
         guard MLXBackend.shouldUse(elementCount: values.count, minimumCount: minimumCount) else {
             return nil
@@ -415,6 +459,7 @@ struct MLXDeviceVector {
         self.count = values.count
     }
 
+    /// Sum of all elements in `array`.
     var sum: Double {
         if usesFloat32GPU {
             return Double(MLX.sum(array, stream: .gpu).item(Float.self))
@@ -422,6 +467,7 @@ struct MLXDeviceVector {
         return MLX.sum(array, stream: .cpu).item(Double.self)
     }
 
+    /// Smallest element in `array`.
     var minimum: Double {
         if usesFloat32GPU {
             return Double(array.min(stream: .gpu).item(Float.self))
@@ -429,6 +475,7 @@ struct MLXDeviceVector {
         return array.min(stream: .cpu).item(Double.self)
     }
 
+    /// Largest element in `array`.
     var maximum: Double {
         if usesFloat32GPU {
             return Double(array.max(stream: .gpu).item(Float.self))
@@ -436,6 +483,7 @@ struct MLXDeviceVector {
         return array.max(stream: .cpu).item(Double.self)
     }
 
+    /// Arithmetic mean of all elements in `array`.
     var mean: Double { sum / Double(count) }
 
     /// Sample variance with `ddof` delta degrees of freedom.
@@ -492,20 +540,30 @@ struct MLXDeviceVector {
 /// window, and column/series operations. Every MLX kernel has a native
 /// reference path.
 enum NumericEngine {
+    /// Runs `body` under `policy` scoped to the current task.
     static func withPolicy<R>(_ policy: ExecutionPolicy, _ body: () throws -> R) rethrows -> R {
         try MLXBackend.$policy.withValue(policy, operation: body)
     }
 
     /// Per-column descriptive statistics.
     struct Moments {
+        /// Number of non-missing numeric observations.
         var count: Int
+        /// Arithmetic mean, or `nil` if empty.
         var mean: Double?
+        /// Sample standard deviation (`ddof = 1`), or `nil` if fewer than 2 elements.
         var standardDeviation: Double?
+        /// Median (50th percentile), or `nil` if empty.
         var median: Double?
+        /// Minimum value, or `nil` if empty.
         var min: Double?
+        /// Maximum value, or `nil` if empty.
         var max: Double?
+        /// First quartile (25th percentile), or `nil` if empty.
         var q1: Double?
+        /// Third quartile (75th percentile), or `nil` if empty.
         var q3: Double?
+        /// Sorted non-missing values in ascending order.
         var sorted: [Double] = []
     }
 
@@ -697,6 +755,7 @@ enum NumericEngine {
         }
     }
 
+    /// Computes descriptive moments and sorted values for `numbers`.
     static func moments(of numbers: [Double]) -> Moments {
         guard !numbers.isEmpty else {
             return Moments(count: 0)
@@ -815,6 +874,7 @@ enum NumericEngine {
         }
     }
 
+    /// Computes the median of a non-empty ascending `sorted` array.
     static func median(sorted: [Double]) -> Double {
         let mid = sorted.count / 2
         return sorted.count.isMultiple(of: 2)
@@ -822,6 +882,7 @@ enum NumericEngine {
             : sorted[mid]
     }
 
+    /// Computes the linear-interpolation quantile of a non-empty ascending `sorted` array at `probability` in `0...1`.
     static func quantile(sorted: [Double], probability: Double) -> Double {
         let p = Swift.min(Swift.max(probability, 0), 1)
         let position = p * Double(sorted.count - 1)
@@ -849,6 +910,7 @@ enum NumericEngine {
         }
     }
 
+    /// Performs grouped reductions on the MLX CPU stream in `float64`.
     private static func reduceGroupsOnCPU(
         values: [Double?],
         groupIds: [Int],
@@ -936,6 +998,7 @@ enum NumericEngine {
         }
     }
 
+    /// Scatters and sums `values` into `groupCount` buckets indexed by `ids` on the MLX CPU stream.
     private static func scatterSum(_ values: [Double], ids: [Int32], groupCount: Int) -> [Double] {
         let output = MLX.zeros([groupCount], type: Double.self, stream: .cpu)
         let updated = output.at[MLXArray(ids), stream: .cpu].add(MLXVector.makeArray(values))
@@ -1011,6 +1074,7 @@ enum NumericEngine {
 
     // MARK: Zero-Boxing Float64Column <-> MLXArray Kernels
 
+    /// Computes a cumulative operation (`sum`, `product`, `minimum`, `maximum`) directly into a ``Float64Column``.
     static func cumulativeColumn(
         _ buffer: NumericBuffer,
         name: String,
@@ -1073,6 +1137,7 @@ enum NumericEngine {
         return Float64Column(name: name, values: outVals, nullBitmap: nulls)
     }
 
+    /// Clamps numeric values in `buffer` to `lower...upper` using MLX.
     static func clipColumn(
         _ buffer: NumericBuffer,
         name: String,
@@ -1101,6 +1166,7 @@ enum NumericEngine {
         return NumericBuffer.makeColumn(name: name, values: clipped, nullBitmap: buffer.floatColumn.nullBitmap)
     }
 
+    /// Rounds numeric values in `buffer` to `decimals` decimal places using MLX.
     static func roundColumn(
         _ buffer: NumericBuffer,
         name: String,
@@ -1121,6 +1187,7 @@ enum NumericEngine {
         return NumericBuffer.makeColumn(name: name, values: rounded, nullBitmap: buffer.floatColumn.nullBitmap)
     }
 
+    /// Computes element-wise absolute values of `buffer` using `vDSP_vabsD`.
     static func absColumn(_ buffer: NumericBuffer, name: String) -> Float64Column? {
         guard MLXBackend.shouldUse(elementCount: buffer.count) else { return nil }
         let count = buffer.count
@@ -1134,6 +1201,7 @@ enum NumericEngine {
         return Float64Column(name: name, values: outVals, nullBitmap: buffer.floatColumn.nullBitmap)
     }
 
+    /// Computes first differences over `periods` rows using MLX.
     static func differenceColumn(
         _ buffer: NumericBuffer,
         name: String,
@@ -1181,6 +1249,7 @@ enum NumericEngine {
         return Float64Column(name: name, values: outVals, nullBitmap: outNulls)
     }
 
+    /// Computes fractional changes over `periods` rows using MLX.
     static func percentChangeColumn(
         _ buffer: NumericBuffer,
         name: String,
@@ -1289,6 +1358,7 @@ enum NumericEngine {
         return accumulator.sum() + tail == 0
     }
 
+    /// Performs element-wise binary arithmetic when the MLX execution policy threshold is met.
     static func binaryArithmeticColumn(
         left: NumericBuffer,
         right: NumericBuffer,
@@ -1349,6 +1419,7 @@ enum NumericEngine {
         return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: updatedNulls)
     }
 
+    /// Performs element-wise scalar arithmetic using `vDSP` when the MLX execution policy threshold is met.
     static func scalarArithmeticColumn(
         buffer: NumericBuffer,
         name: String,
@@ -1398,6 +1469,7 @@ enum NumericEngine {
         return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
     }
 
+    /// Evaluates a unary mathematical function using MLX GPU (`float32`) or Accelerate `vForce` (`float64`).
     static func unaryMathColumn(
         buffer: NumericBuffer,
         name: String,
@@ -1517,6 +1589,7 @@ enum NumericEngine {
         return NumericBuffer.makeColumn(name: name, values: raw, nullBitmap: nulls)
     }
 
+    /// Raises every element in `buffer` to `exponent` using MLX `pow` on the CPU stream.
     static func powerColumn(
         buffer: NumericBuffer,
         name: String,
@@ -1535,6 +1608,7 @@ enum NumericEngine {
 
     // MARK: Legacy [DataValue] wrappers (maintained for internal test compatibility)
 
+    /// Legacy `[DataValue]` wrapper around ``cumulativeColumn(_:name:using:)``.
     static func cumulative(
         _ buffer: NumericBuffer,
         using function: CumulativeFunction
@@ -1542,6 +1616,7 @@ enum NumericEngine {
         cumulativeColumn(buffer, name: "", using: function)?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``clipColumn(_:name:lower:upper:)``.
     static func clip(
         _ buffer: NumericBuffer,
         lower: Double?,
@@ -1550,6 +1625,7 @@ enum NumericEngine {
         clipColumn(buffer, name: "", lower: lower, upper: upper)?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``roundColumn(_:name:decimals:)``.
     static func round(
         _ buffer: NumericBuffer,
         decimals: Int
@@ -1557,10 +1633,12 @@ enum NumericEngine {
         roundColumn(buffer, name: "", decimals: decimals)?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``absColumn(_:name:)``.
     static func abs(_ buffer: NumericBuffer) -> [DataValue]? {
         absColumn(buffer, name: "")?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``differenceColumn(_:name:periods:)``.
     static func difference(
         _ buffer: NumericBuffer,
         periods: Int
@@ -1568,6 +1646,7 @@ enum NumericEngine {
         differenceColumn(buffer, name: "", periods: periods)?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``percentChangeColumn(_:name:periods:)``.
     static func percentChange(
         _ buffer: NumericBuffer,
         periods: Int
@@ -1575,6 +1654,7 @@ enum NumericEngine {
         percentChangeColumn(buffer, name: "", periods: periods)?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``binaryArithmeticColumn(left:right:name:operation:)``.
     static func binaryArithmetic(
         left: NumericBuffer,
         right: NumericBuffer,
@@ -1583,6 +1663,7 @@ enum NumericEngine {
         binaryArithmeticColumn(left: left, right: right, name: "", operation: operation)?.toDataValues()
     }
 
+    /// Legacy `[DataValue]` wrapper around ``scalarArithmeticColumn(buffer:name:scalar:operation:)``.
     static func scalarArithmetic(
         buffer: NumericBuffer,
         scalar: Double,
@@ -1765,6 +1846,8 @@ extension DataFrame {
     /// Extracts a numeric column as an ``MLXVector`` (preserving missing-value
     /// positions).
     ///
+    /// - Parameter column: Name of the numeric column to extract.
+    /// - Returns: An ``MLXVector`` containing the column's numeric values and missing mask.
     /// - Throws: ``DataFrameError/columnNotFound(_:)`` or
     ///   ``DataFrameError/nonNumericColumn(_:)`` if the column contains
     ///   non-numeric values.
@@ -1774,6 +1857,9 @@ extension DataFrame {
     }
 
     /// Creates a `DataFrame` from ordered named ``MLXVector`` columns.
+    ///
+    /// - Parameter mlxColumns: Ordered `(name, vector)` pairs.
+    /// - Throws: ``DataFrameError`` if columns are empty, have duplicate names, or differ in length.
     public init(mlxColumns: [(name: String, vector: MLXVector)]) throws {
         try self.init(
             storageColumns: mlxColumns.map { item in
@@ -1791,6 +1877,7 @@ extension Series {
     /// Extracts a numeric series as an ``MLXVector`` (preserving missing-value
     /// positions).
     ///
+    /// - Returns: An ``MLXVector`` containing the series' numeric values and missing mask.
     /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series contains
     ///   non-numeric values.
     public func toMLXVector() throws -> MLXVector {
@@ -1801,6 +1888,10 @@ extension Series {
     }
 
     /// Creates a `Series` from an ``MLXVector``.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the series.
+    ///   - mlxVector: Source ``MLXVector``.
     public init(name: String, mlxVector: MLXVector) {
         let col = NumericBuffer.makeColumn(
             name: name,
@@ -1827,6 +1918,11 @@ public enum BandalRuntime {
 
     /// Runs `operation` with the specified `ExecutionPolicy` scoped to the
     /// current task, without mutating global MLX device state.
+    ///
+    /// - Parameters:
+    ///   - policy: The ``ExecutionPolicy`` to apply for the duration of `operation`.
+    ///   - operation: Synchronous closure to execute under `policy`.
+    /// - Returns: The value returned by `operation`.
     public static func withExecutionPolicy<R>(
         _ policy: ExecutionPolicy,
         operation: () throws -> R
@@ -1836,6 +1932,11 @@ public enum BandalRuntime {
 
     /// Runs an asynchronous `operation` with the specified `ExecutionPolicy`
     /// scoped to the current task.
+    ///
+    /// - Parameters:
+    ///   - policy: The ``ExecutionPolicy`` to apply for the duration of `operation`.
+    ///   - operation: Asynchronous closure to execute under `policy`.
+    /// - Returns: The value returned by `operation`.
     public static func withExecutionPolicy<R>(
         _ policy: ExecutionPolicy,
         operation: () async throws -> R

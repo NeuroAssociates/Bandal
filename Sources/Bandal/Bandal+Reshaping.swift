@@ -6,6 +6,13 @@ extension DataFrame {
     ///
     /// Output is column-major: values for each source column retain their input
     /// row order, and source columns retain their original order.
+    ///
+    /// - Parameters:
+    ///   - idColumns: Identifier columns retained across all unpivoted rows.
+    ///   - variableName: Name for the output column holding source column names. Defaults to `"variable"`.
+    ///   - valueName: Name for the output column holding source cell values. Defaults to `"value"`.
+    /// - Returns: A melted (long-format) ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if column names are empty, duplicated, or not found.
     public func melt(
         idColumns: [String],
         variableName: String = "variable",
@@ -48,6 +55,14 @@ extension DataFrame {
     /// Missing values in `values` are ignored by the selected aggregation.
     /// Pivot columns are sorted by their typed `DataValue` order and named with
     /// the value column, reflected pivot key, and aggregation operation.
+    ///
+    /// - Parameters:
+    ///   - index: One or more column names forming the row index of the pivot table.
+    ///   - pivotColumn: Column whose distinct values become output columns.
+    ///   - valueColumn: Column whose values are aggregated per `(index, pivotColumn)` cell.
+    ///   - operation: The ``AggregateFunction`` to apply.
+    /// - Returns: A pivoted ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `index` is empty, column names overlap or are missing, or `valueColumn` cannot be aggregated.
     public func pivotTable(
         index: [String],
         columns pivotColumn: String,
@@ -102,6 +117,12 @@ extension DataFrame {
     ///
     /// Whitespace around split items is trimmed. Non-string or `.missing` cells
     /// remain a single row unchanged.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the column containing delimited string lists.
+    ///   - separator: Delimiter substring used to split each string. Defaults to `","`.
+    /// - Returns: An expanded ``DataFrame`` with one row per split item.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `column` does not exist.
     public func exploded(
         _ column: String,
         separator: String = ","
@@ -144,6 +165,12 @@ extension DataFrame {
     ///
     /// The first column (`indexColumnName`) stores the original column names,
     /// and each original row `i` becomes a column named `"\(rowPrefix)\(i)"`.
+    ///
+    /// - Parameters:
+    ///   - indexColumnName: Name of the leading column storing original column names. Defaults to `"column"`.
+    ///   - rowPrefix: Prefix for generated row-based column names. Defaults to `"row_"`.
+    /// - Returns: A transposed ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `indexColumnName` is empty or collides with a generated row column name.
     public func transposed(
         indexColumnName: String = "column",
         rowPrefix: String = "row_"
@@ -163,6 +190,7 @@ extension DataFrame {
     }
 }
 
+/// Formats a ``DataValue`` pivot key as a descriptive column-name token.
 private func pivotKeyName(_ value: DataValue) -> String {
     switch value {
     case .number(let number): "number_\(number)"
@@ -173,6 +201,7 @@ private func pivotKeyName(_ value: DataValue) -> String {
     }
 }
 
+/// Lexicographical comparison for arrays of ``DataValue`` index keys.
 private func dataValueKeysAreOrderedBefore(
     _ lhs: [DataValue],
     _ rhs: [DataValue]

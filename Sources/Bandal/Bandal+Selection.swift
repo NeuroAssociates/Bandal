@@ -1,8 +1,10 @@
 import Foundation
 
-/// A composable, type-safe row predicate used with ``DataFrame/query(_:)-5r82k``.
+/// A composable, type-safe row predicate used with ``DataFrame/query(_:)-(RowPredicate)``.
 public struct RowPredicate: Sendable {
+    /// Row-by-row evaluation closure used when a vectorized fast mask is unavailable.
     let evaluate: @Sendable ([String: DataValue]) throws -> Bool
+    /// Optional vectorized columnar evaluation closure returning a ``BitSet`` mask directly.
     let fastMask: (@Sendable (DataFrame) throws -> BitSet?)?
 
     /// Creates a predicate from a closure evaluated against each row.
@@ -13,6 +15,11 @@ public struct RowPredicate: Sendable {
         self.fastMask = nil
     }
 
+    /// Creates a predicate with both a row-wise fallback closure and a columnar `fastMask` evaluator.
+    ///
+    /// - Parameters:
+    ///   - evaluate: Row-wise evaluation closure.
+    ///   - fastMask: Optional vectorized ``BitSet`` evaluator.
     init(
         evaluate: @escaping @Sendable ([String: DataValue]) throws -> Bool,
         fastMask: (@Sendable (DataFrame) throws -> BitSet?)?
@@ -21,6 +28,7 @@ public struct RowPredicate: Sendable {
         self.fastMask = fastMask
     }
 
+    /// Looks up `column` in a row dictionary or throws ``DataFrameError/columnNotFound(_:)``.
     private static func requireValue(in row: [String: DataValue], column: String) throws -> DataValue {
         guard let value = row[column] else {
             throw DataFrameError.columnNotFound(column)
@@ -28,6 +36,7 @@ public struct RowPredicate: Sendable {
         return value
     }
 
+    /// Looks up `name` in `df` or throws ``DataFrameError/columnNotFound(_:)``.
     private static func requireColumn(in df: DataFrame, name: String) throws -> DataColumn {
         guard let col = df.columns.first(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -35,6 +44,7 @@ public struct RowPredicate: Sendable {
         return col
     }
 
+    /// Evaluates `predicate` across a ``NumericBuffer`` and packs results into 64-bit ``BitSet`` words.
     private static func numericMask(
         buffer: NumericBuffer,
         predicate: (Double) -> Bool
@@ -109,6 +119,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where `column` equals `value`.
+    ///
+    /// - Parameters:
+    ///   - name: Column name to inspect.
+    ///   - value: Target ``DataValue`` to match.
+    /// - Returns: A ``RowPredicate`` matching rows where `column == value`.
     public static func column(_ name: String, equals value: DataValue) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -159,6 +174,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where `column` does not equal `value`.
+    ///
+    /// - Parameters:
+    ///   - name: Column name to inspect.
+    ///   - value: ``DataValue`` to exclude.
+    /// - Returns: A ``RowPredicate`` matching rows where `column != value`.
     public static func column(_ name: String, notEquals value: DataValue) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -174,6 +194,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where numeric `column` is strictly greater than `threshold`.
+    ///
+    /// - Parameters:
+    ///   - name: Numeric column name.
+    ///   - threshold: Exclusive lower bound.
+    /// - Returns: A ``RowPredicate`` matching rows where `column > threshold`.
     public static func column(_ name: String, greaterThan threshold: Double) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -197,6 +222,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where numeric `column` is greater than or equal to `threshold`.
+    ///
+    /// - Parameters:
+    ///   - name: Numeric column name.
+    ///   - threshold: Inclusive lower bound.
+    /// - Returns: A ``RowPredicate`` matching rows where `column >= threshold`.
     public static func column(_ name: String, greaterThanOrEqual threshold: Double) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -220,6 +250,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where numeric `column` is strictly less than `threshold`.
+    ///
+    /// - Parameters:
+    ///   - name: Numeric column name.
+    ///   - threshold: Exclusive upper bound.
+    /// - Returns: A ``RowPredicate`` matching rows where `column < threshold`.
     public static func column(_ name: String, lessThan threshold: Double) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -243,6 +278,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where numeric `column` is less than or equal to `threshold`.
+    ///
+    /// - Parameters:
+    ///   - name: Numeric column name.
+    ///   - threshold: Inclusive upper bound.
+    /// - Returns: A ``RowPredicate`` matching rows where `column <= threshold`.
     public static func column(_ name: String, lessThanOrEqual threshold: Double) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -266,6 +306,13 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where numeric `column` lies in `lower...upper` (or `(lower, upper)` when `inclusive` is `false`).
+    ///
+    /// - Parameters:
+    ///   - name: Numeric column name.
+    ///   - lower: Lower bound.
+    ///   - upper: Upper bound.
+    ///   - inclusive: Whether endpoints are included. Defaults to `true`.
+    /// - Returns: A ``RowPredicate`` matching rows within the specified interval.
     public static func column(
         _ name: String,
         between lower: Double,
@@ -300,6 +347,11 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where `column` belongs to `candidates`.
+    ///
+    /// - Parameters:
+    ///   - name: Column name to inspect.
+    ///   - candidates: Set of allowed ``DataValue`` elements.
+    /// - Returns: A ``RowPredicate`` matching rows whose cell value is in `candidates`.
     public static func column(_ name: String, in candidates: Set<DataValue>) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -317,6 +369,12 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where string `column` contains `substring`.
+    ///
+    /// - Parameters:
+    ///   - name: String column name.
+    ///   - substring: Substring to search for.
+    ///   - caseSensitive: Whether the search is case-sensitive. Defaults to `true`.
+    /// - Returns: A ``RowPredicate`` matching rows whose string contains `substring`.
     public static func column(
         _ name: String,
         contains substring: String,
@@ -349,6 +407,9 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where `column` is `.missing`.
+    ///
+    /// - Parameter name: Column name to check.
+    /// - Returns: A ``RowPredicate`` matching rows where `column` is `.missing`.
     public static func isMissing(_ name: String) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -362,6 +423,9 @@ public struct RowPredicate: Sendable {
     }
 
     /// Matches rows where `column` is not `.missing`.
+    ///
+    /// - Parameter name: Column name to check.
+    /// - Returns: A ``RowPredicate`` matching rows where `column` is not `.missing`.
     public static func notMissing(_ name: String) -> RowPredicate {
         RowPredicate(
             evaluate: { row in
@@ -375,6 +439,9 @@ public struct RowPredicate: Sendable {
     }
 
     /// Logical conjunction (`AND`) of two predicates.
+    ///
+    /// - Parameter other: The second predicate.
+    /// - Returns: A combined ``RowPredicate`` that requires both predicates to match.
     public func and(_ other: RowPredicate) -> RowPredicate {
         let lhs = evaluate
         let rhs = other.evaluate
@@ -392,6 +459,9 @@ public struct RowPredicate: Sendable {
     }
 
     /// Logical disjunction (`OR`) of two predicates.
+    ///
+    /// - Parameter other: The second predicate.
+    /// - Returns: A combined ``RowPredicate`` that matches when either predicate matches.
     public func or(_ other: RowPredicate) -> RowPredicate {
         let lhs = evaluate
         let rhs = other.evaluate
@@ -424,16 +494,29 @@ public struct RowPredicate: Sendable {
     }
 
     /// Returns a predicate that matches rows satisfying both operands.
+    ///
+    /// - Parameters:
+    ///   - lhs: Left-hand predicate.
+    ///   - rhs: Right-hand predicate.
+    /// - Returns: Conjunction of `lhs` and `rhs`.
     public static func && (lhs: RowPredicate, rhs: RowPredicate) -> RowPredicate {
         lhs.and(rhs)
     }
 
     /// Returns a predicate that matches rows satisfying either operand.
+    ///
+    /// - Parameters:
+    ///   - lhs: Left-hand predicate.
+    ///   - rhs: Right-hand predicate.
+    /// - Returns: Disjunction of `lhs` and `rhs`.
     public static func || (lhs: RowPredicate, rhs: RowPredicate) -> RowPredicate {
         lhs.or(rhs)
     }
 
     /// Returns a predicate that matches rows not satisfying the operand.
+    ///
+    /// - Parameter predicate: Predicate to negate.
+    /// - Returns: Negated ``RowPredicate``.
     public static prefix func ! (predicate: RowPredicate) -> RowPredicate {
         predicate.negated
     }
@@ -441,12 +524,19 @@ public struct RowPredicate: Sendable {
 
 /// Date components extractable from `.date` columns in UTC.
 public enum DateComponent: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Four-digit calendar year in UTC.
     case year
+    /// Calendar month (`1...12`) in UTC.
     case month
+    /// Day of the month (`1...31`) in UTC.
     case day
+    /// Gregorian weekday (`1...7`, Sunday = 1) in UTC.
     case weekday
+    /// Hour of the day (`0...23`) in UTC.
     case hour
+    /// Minute of the hour (`0...59`) in UTC.
     case minute
+    /// Second of the minute (`0...59`) in UTC.
     case second
 
     /// The lowercase name of the component.
@@ -455,11 +545,19 @@ public enum DateComponent: String, Hashable, Sendable, Codable, CaseIterable, Cu
 
 extension DataFrame {
     /// Returns a new data frame containing the requested columns in the given order.
+    ///
+    /// - Parameter names: Variadic list of column names to keep.
+    /// - Returns: A projected ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `names` is empty or any column does not exist.
     public func select(_ names: String...) throws -> DataFrame {
         try select(columns: names)
     }
 
     /// Returns a new data frame containing the requested columns in the given order.
+    ///
+    /// - Parameter names: Array of column names to keep.
+    /// - Returns: A projected ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `names` is empty or any column does not exist.
     public func select(columns names: [String]) throws -> DataFrame {
         guard !names.isEmpty else {
             throw DataFrameError.emptyColumns
@@ -474,6 +572,9 @@ extension DataFrame {
     }
 
     /// Returns the row at `index`, or `nil` when `index` is out of bounds.
+    ///
+    /// - Parameter index: Zero-based row index.
+    /// - Returns: The ``DataRow`` at `index`, or `nil` if out of range.
     public func row(at index: Int) -> DataRow? {
         guard (0..<rowCount).contains(index) else { return nil }
         var map: [String: DataValue] = [:]
@@ -490,11 +591,17 @@ extension DataFrame {
     }
 
     /// Accesses a row by zero-based index (`df[row: 0]`).
+    ///
+    /// - Parameter index: Zero-based row index.
+    /// - Returns: The ``DataRow`` at `index`, or `nil` if out of range.
     public subscript(row index: Int) -> DataRow? {
         row(at: index)
     }
 
     /// Accesses a contiguous slice of rows (`df[rows: 0..<5]`).
+    ///
+    /// - Parameter range: Half-open row index range, clamped to `0..<rowCount`.
+    /// - Returns: A sliced ``DataFrame``.
     public subscript(rows range: Range<Int>) -> DataFrame? {
         let lower = Swift.max(0, Swift.min(range.lowerBound, rowCount))
         let upper = Swift.max(lower, Swift.min(range.upperBound, rowCount))
@@ -502,6 +609,11 @@ extension DataFrame {
     }
 
     /// Accesses a single cell by column name and row index (`df["price", 0]`).
+    ///
+    /// - Parameters:
+    ///   - column: Column name.
+    ///   - row: Zero-based row index.
+    /// - Returns: The cell's ``DataValue``, or `nil` if `column` or `row` is invalid.
     public subscript(column: String, row: Int) -> DataValue? {
         guard (0..<rowCount).contains(row),
               let col = columns.first(where: { $0.name == column })
@@ -512,22 +624,36 @@ extension DataFrame {
     }
 
     /// Exports the frame as a dictionary mapping each column name to its `[DataValue]` array.
+    ///
+    /// - Returns: Dictionary mapping column names to `[DataValue]` arrays.
     public func toDictionary() -> [String: [DataValue]] {
         Dictionary(uniqueKeysWithValues: columns.map { ($0.name, $0.values) })
     }
 
     /// Returns the first `count` rows.
+    ///
+    /// - Parameter count: Maximum number of leading rows to return. Defaults to `5`.
+    /// - Returns: A ``DataFrame`` containing up to `count` leading rows.
+    /// - Throws: ``DataFrameError`` if slicing fails.
     public func head(_ count: Int = 5) throws -> DataFrame {
         try rows(in: 0..<min(max(count, 0), rowCount))
     }
 
     /// Returns the last `count` rows.
+    ///
+    /// - Parameter count: Maximum number of trailing rows to return. Defaults to `5`.
+    /// - Returns: A ``DataFrame`` containing up to `count` trailing rows.
+    /// - Throws: ``DataFrameError`` if slicing fails.
     public func tail(_ count: Int = 5) throws -> DataFrame {
         let size = min(max(count, 0), rowCount)
         return try rows(in: (rowCount - size)..<rowCount)
     }
 
     /// Returns a new frame containing rows for which the predicate is true.
+    ///
+    /// - Parameter predicate: Closure evaluated for each row dictionary; returns `true` to keep the row.
+    /// - Returns: A filtered ``DataFrame``.
+    /// - Throws: Any error thrown by `predicate`.
     public func filterRows(
         _ predicate: ([String: DataValue]) throws -> Bool
     ) throws -> DataFrame {
@@ -547,6 +673,10 @@ extension DataFrame {
     }
 
     /// Filters rows using a composable ``RowPredicate``.
+    ///
+    /// - Parameter predicate: The ``RowPredicate`` to evaluate.
+    /// - Returns: A filtered ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if a referenced column does not exist.
     public func query(_ predicate: RowPredicate) throws -> DataFrame {
         if let mask = try predicate.fastMask?(self) {
             return try rows(matching: mask)
@@ -559,12 +689,19 @@ extension DataFrame {
     /// Supported operators: `==`, `!=`, `>=`, `<=`, `>`, `<`, combined with
     /// `&&` / `and` or `||` / `or`. Right-hand literals may be numbers,
     /// `true`/`false`, `nil`/`null`/`NaN` (for `.missing`), or quoted strings.
+    ///
+    /// - Parameter expression: Query string to parse and evaluate.
+    /// - Returns: A filtered ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if the expression syntax is invalid or references an unknown column.
     public func query(_ expression: String) throws -> DataFrame {
         let predicate = try Self.parseQueryExpression(expression, availableColumns: Set(columnNames))
         return try query(predicate)
     }
 
     /// Internal helper to add or replace a column directly from an `AnyColumn` storage.
+    ///
+    /// - Parameter storage: Typed column storage buffer.
+    /// - Returns: A new ``DataFrame`` with the added or replaced column.
     func withColumn(storage: any AnyColumn) throws -> DataFrame {
         guard !storage.name.isEmpty else {
             throw DataFrameError.emptyColumnName
@@ -587,6 +724,12 @@ extension DataFrame {
     }
 
     /// Returns a copy with a new or replaced column.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the column to insert or replace.
+    ///   - values: Cell values aligned with the frame's rows.
+    /// - Returns: A new ``DataFrame`` containing the updated column.
+    /// - Throws: ``DataFrameError`` if `name` is empty, `values.count != rowCount`, or any numeric value is non-finite.
     public func withColumn(name: String, values: [DataValue]) throws -> DataFrame {
         guard !name.isEmpty else {
             throw DataFrameError.emptyColumnName
@@ -614,6 +757,12 @@ extension DataFrame {
     }
 
     /// Returns a copy with a new or replaced column computed row-by-row (similar to `df.assign()`).
+    ///
+    /// - Parameters:
+    ///   - name: Name of the column to insert or replace.
+    ///   - transform: Closure receiving each ``DataRow`` and returning its computed ``DataValue``.
+    /// - Returns: A new ``DataFrame`` containing the computed column.
+    /// - Throws: Any error thrown by `transform` or ``withColumn(name:values:)``.
     public func withColumn(
         name: String,
         computing transform: (DataRow) throws -> DataValue
@@ -629,6 +778,10 @@ extension DataFrame {
     ///
     /// Unspecified columns keep their names. Unknown source names and resulting
     /// duplicate or empty names are rejected.
+    ///
+    /// - Parameter names: Dictionary mapping existing column names to replacement names.
+    /// - Returns: A new ``DataFrame`` with renamed columns.
+    /// - Throws: ``DataFrameError`` if a source name does not exist or a target name is empty or duplicated.
     public func renamedColumns(_ names: [String: String]) throws -> DataFrame {
         for name in names.keys where !columnNames.contains(name) {
             throw DataFrameError.columnNotFound(name)
@@ -647,6 +800,13 @@ extension DataFrame {
     /// Missing values remain missing. String-to-number conversion accepts the
     /// same comma and dollar-sign conventions as CSV numeric inference. Dates
     /// use `dateFormat` when supplied, or ISO 8601 otherwise.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the column to convert.
+    ///   - type: Target concrete ``DataType`` (`.number`, `.string`, `.boolean`, or `.date`).
+    ///   - dateFormat: Optional `DateFormatter` pattern used when parsing `.date` values.
+    /// - Returns: A new ``DataFrame`` with the converted column.
+    /// - Throws: ``DataFrameError`` if `name` is not found or any cell cannot be converted.
     public func castColumn(
         _ name: String,
         to type: DataType,
@@ -668,6 +828,13 @@ extension DataFrame {
     /// Extracts a calendar component (`.year`, `.month`, `.day`, `.weekday`,
     /// `.hour`, `.minute`, `.second`) in UTC from a `.date` column into a
     /// numeric column.
+    ///
+    /// - Parameters:
+    ///   - component: The ``DateComponent`` to extract.
+    ///   - column: Source `.date` column name.
+    ///   - outputColumn: Optional name for the resulting column; defaults to `"\(column)_\(component.rawValue)"`.
+    /// - Returns: A new ``DataFrame`` with the extracted numeric component column.
+    /// - Throws: ``DataFrameError`` if `column` does not exist or contains non-date values.
     public func dateComponent(
         _ component: DateComponent,
         from column: String,
@@ -704,16 +871,34 @@ extension DataFrame {
     // MARK: String column operations
 
     /// Converts string values in `column` to lowercase. Non-string values (other than `.missing`) throw `.invalidConversion`.
+    ///
+    /// - Parameters:
+    ///   - column: Source string column name.
+    ///   - outputColumn: Optional output column name; replaces `column` when `nil`.
+    /// - Returns: A new ``DataFrame`` with lowercased strings.
+    /// - Throws: ``DataFrameError`` if `column` is missing or contains non-string values.
     public func lowercased(_ column: String, as outputColumn: String? = nil) throws -> DataFrame {
         try transformStrings(in: column, as: outputColumn) { .string($0.lowercased()) }
     }
 
     /// Converts string values in `column` to uppercase.
+    ///
+    /// - Parameters:
+    ///   - column: Source string column name.
+    ///   - outputColumn: Optional output column name; replaces `column` when `nil`.
+    /// - Returns: A new ``DataFrame`` with uppercased strings.
+    /// - Throws: ``DataFrameError`` if `column` is missing or contains non-string values.
     public func uppercased(_ column: String, as outputColumn: String? = nil) throws -> DataFrame {
         try transformStrings(in: column, as: outputColumn) { .string($0.uppercased()) }
     }
 
     /// Trims leading and trailing whitespace and newlines from string values in `column`.
+    ///
+    /// - Parameters:
+    ///   - column: Source string column name.
+    ///   - outputColumn: Optional output column name; replaces `column` when `nil`.
+    /// - Returns: A new ``DataFrame`` with trimmed strings.
+    /// - Throws: ``DataFrameError`` if `column` is missing or contains non-string values.
     public func trimmed(_ column: String, as outputColumn: String? = nil) throws -> DataFrame {
         try transformStrings(in: column, as: outputColumn) {
             .string($0.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -721,6 +906,12 @@ extension DataFrame {
     }
 
     /// Computes character counts of string values in `column` as a numeric column.
+    ///
+    /// - Parameters:
+    ///   - column: Source string column name.
+    ///   - outputColumn: Optional output column name; defaults to `"\(column)_length"`.
+    /// - Returns: A new ``DataFrame`` with the character-length column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or contains non-string values.
     public func stringLength(_ column: String, as outputColumn: String? = nil) throws -> DataFrame {
         try transformStrings(in: column, as: outputColumn ?? "\(column)_length") {
             .number(Double($0.count))
@@ -728,6 +919,14 @@ extension DataFrame {
     }
 
     /// Replaces occurrences of `target` with `replacement` in string values of `column`.
+    ///
+    /// - Parameters:
+    ///   - column: Source string column name.
+    ///   - target: Substring to find.
+    ///   - replacement: Replacement string.
+    ///   - outputColumn: Optional output column name; replaces `column` when `nil`.
+    /// - Returns: A new ``DataFrame`` with updated string values.
+    /// - Throws: ``DataFrameError`` if `column` is missing or contains non-string values.
     public func replacingSubstring(
         in column: String,
         target: String,
@@ -740,6 +939,14 @@ extension DataFrame {
     }
 
     /// Produces a Boolean column indicating whether each string in `column` contains `substring`.
+    ///
+    /// - Parameters:
+    ///   - column: Source string column name.
+    ///   - substring: Substring to search for.
+    ///   - caseSensitive: Whether matching is case-sensitive. Defaults to `true`.
+    ///   - outputColumn: Optional output column name; defaults to `"\(column)_contains"`.
+    /// - Returns: A new ``DataFrame`` with the Boolean match column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or contains non-string values.
     public func containsSubstring(
         _ column: String,
         _ substring: String,
@@ -754,6 +961,7 @@ extension DataFrame {
         }
     }
 
+    /// Applies `transform` to every non-missing `.string` cell in `column` and writes the result to `outputColumn ?? column`.
     private func transformStrings(
         in column: String,
         as outputColumn: String?,
@@ -777,6 +985,12 @@ extension DataFrame {
     ///
     /// If `in` is omitted, all columns are compared. Missing values compare as
     /// equal. `keep` controls which occurrence is not marked as a duplicate.
+    ///
+    /// - Parameters:
+    ///   - selectedColumns: Optional subset of column names used to identify duplicates; `nil` uses all columns.
+    ///   - keep: Which duplicate occurrence to mark as `false` (non-duplicate). Defaults to `.first`.
+    /// - Returns: A `[Bool]` array of length `rowCount` where `true` marks a duplicate row.
+    /// - Throws: ``DataFrameError`` if `selectedColumns` is empty or contains an unknown column name.
     public func duplicatedRows(
         in selectedColumns: [String]? = nil,
         keep: DuplicateKeep = .first
@@ -820,6 +1034,12 @@ extension DataFrame {
     ///
     /// Rows are kept in their original order. If `in` is omitted, all columns
     /// determine whether rows are duplicates.
+    ///
+    /// - Parameters:
+    ///   - selectedColumns: Optional subset of column names used to identify duplicates; `nil` uses all columns.
+    ///   - keep: Which occurrence of a duplicated row to retain. Defaults to `.first`.
+    /// - Returns: A deduplicated ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `selectedColumns` is empty or contains an unknown column name.
     public func dropDuplicates(
         in selectedColumns: [String]? = nil,
         keep: DuplicateKeep = .first
@@ -836,6 +1056,10 @@ extension DataFrame {
     ///
     /// Values and rows retain their original order. An empty frame list is
     /// invalid because a `DataFrame` must have at least one column.
+    ///
+    /// - Parameter frames: Non-empty array of frames with identical schemas.
+    /// - Returns: A vertically concatenated ``DataFrame``.
+    /// - Throws: ``DataFrameError/emptyColumns`` if `frames` is empty, or ``DataFrameError/incompatibleSchema(expected:actual:)`` if schemas differ.
     public static func concatenatingRows(_ frames: [DataFrame]) throws -> DataFrame {
         guard let first = frames.first else {
             throw DataFrameError.emptyColumns
@@ -855,6 +1079,7 @@ extension DataFrame {
         return try DataFrame(columns: combined)
     }
 
+    /// Validates that `requestedNames` (when non-nil) is non-empty and every column exists in the frame.
     private func validatedColumnNames(_ requestedNames: [String]?) throws -> [String] {
         guard let requestedNames else { return columnNames }
         guard !requestedNames.isEmpty else { throw DataFrameError.emptyColumns }
@@ -866,6 +1091,7 @@ extension DataFrame {
         return requestedNames
     }
 
+    /// Converts a single ``DataValue`` to `type`, using `dateFormat` when parsing dates.
     private func convert(
         _ value: DataValue,
         to type: DataType,
@@ -909,6 +1135,7 @@ extension DataFrame {
 
     // MARK: Query expression parser
 
+    /// Parses a string query expression into a composable ``RowPredicate``.
     private static func parseQueryExpression(
         _ expression: String,
         availableColumns: Set<String>
@@ -979,6 +1206,7 @@ extension DataFrame {
         throw DataFrameError.invalidCSV("unsupported query expression '\(trimmed)'")
     }
 
+    /// Parses the right-hand literal token of a query clause into a ``DataValue``.
     private static func parseQueryLiteral(_ raw: String) -> DataValue {
         if (raw.hasPrefix("\"") && raw.hasSuffix("\"")) || (raw.hasPrefix("'") && raw.hasSuffix("'")),
            raw.count >= 2
@@ -1001,6 +1229,10 @@ extension DataFrame {
     }
 }
 
+/// Returns the canonical lowercase string name for `type`.
+///
+/// - Parameter type: The ``DataType`` to describe.
+/// - Returns: Lowercase string name of `type`.
 func dataTypeName(_ type: DataType) -> String {
     switch type {
     case .number: "number"

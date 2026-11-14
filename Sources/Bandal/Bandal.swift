@@ -1,9 +1,19 @@
 import Foundation
 
+/// Formats a `Date` as an ISO 8601 UTC timestamp string.
+///
+/// - Parameter date: The date to format.
+/// - Returns: An ISO 8601 string representation of `date`.
 func formatDateAsISO8601(_ date: Date) -> String {
     ISO8601DateFormatter().string(from: date)
 }
 
+/// Parses a date string strictly using the given `DateFormatter` format pattern in UTC.
+///
+/// - Parameters:
+///   - value: The raw date string to parse.
+///   - format: A `DateFormatter` pattern such as `"yyyy-MM-dd"`.
+/// - Returns: The parsed `Date` if `value` round-trips through `format`; otherwise `nil`.
 func parseDate(_ value: String, format: String) -> Date? {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -23,33 +33,48 @@ public enum DataValue: Hashable, Sendable, Codable,
     ExpressibleByFloatLiteral, ExpressibleByIntegerLiteral,
     ExpressibleByStringLiteral, ExpressibleByBooleanLiteral, ExpressibleByNilLiteral
 {
+    /// A finite 64-bit floating-point number.
     case number(Double)
+    /// A UTF-8 text string.
     case string(String)
+    /// A Boolean truth value (`true` or `false`).
     case boolean(Bool)
+    /// A calendar timestamp (`Date`).
     case date(Date)
+    /// A missing (`null` / `nil`) cell value.
     case missing
 
     /// Creates a `.number` value from a floating-point literal.
+    ///
+    /// - Parameter value: The floating-point literal value.
     public init(floatLiteral value: Double) {
         self = .number(value)
     }
 
     /// Creates a `.number` value from an integer literal, converted to `Double`.
+    ///
+    /// - Parameter value: The integer literal value.
     public init(integerLiteral value: Int) {
         self = .number(Double(value))
     }
 
     /// Creates a `.string` value from a string literal.
+    ///
+    /// - Parameter value: The string literal value.
     public init(stringLiteral value: String) {
         self = .string(value)
     }
 
     /// Creates a `.boolean` value from a Boolean literal.
+    ///
+    /// - Parameter value: The Boolean literal value.
     public init(booleanLiteral value: Bool) {
         self = .boolean(value)
     }
 
     /// Creates a `.missing` value from a `nil` literal.
+    ///
+    /// - Parameter nilLiteral: The `nil` literal tuple.
     public init(nilLiteral: ()) {
         self = .missing
     }
@@ -78,7 +103,7 @@ public enum DataValue: Hashable, Sendable, Codable,
         return nil
     }
 
-        /// `true` when the cell is `.missing`.
+    /// `true` when the cell is `.missing`.
     public var isMissing: Bool {
         self == .missing
     }
@@ -103,6 +128,8 @@ public enum DataValue: Hashable, Sendable, Codable,
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: The stream to write to.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -110,11 +137,17 @@ public enum DataValue: Hashable, Sendable, Codable,
 
 /// The inferred or explicitly requested type of a data-frame column.
 public enum DataType: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible, CustomDebugStringConvertible {
+    /// Numeric values stored as 64-bit floating-point or integer numbers.
     case number
+    /// Text values stored as UTF-8 strings or dictionary-encoded categories.
     case string
+    /// Boolean values (`true` or `false`).
     case boolean
+    /// Calendar timestamps (`Date`).
     case date
+    /// Multiple distinct value types within the same column.
     case mixed
+    /// No non-missing values are present to infer a concrete type.
     case unknown
 
     /// The raw string value of the type, such as `"number"`.
@@ -125,17 +158,29 @@ public enum DataType: String, Hashable, Sendable, Codable, CaseIterable, CustomS
 
 /// Errors raised while creating or querying a ``DataFrame``.
 public enum DataFrameError: Error, Equatable, Sendable, LocalizedError {
+    /// A ``DataFrame`` was initialized or selected with zero columns.
     case emptyColumns
+    /// A column name is the empty string (`""`).
     case emptyColumnName
+    /// Two or more columns share the same name.
     case duplicateColumnName(String)
+    /// A column's element count does not match the expected row count of the frame.
     case unequalColumnLengths(column: String, expected: Int, actual: Int)
+    /// A referenced column name does not exist in the frame.
     case columnNotFound(String)
+    /// A numeric cell contains `NaN` or infinity (`±∞`).
     case nonFiniteValue(column: String, row: Int)
+    /// A numeric operation was requested on a column that contains non-numeric values.
     case nonNumericColumn(String)
+    /// CSV or JSON input could not be parsed due to structural or formatting errors.
     case invalidCSV(String)
+    /// An operation would create a column whose name already exists in the frame.
     case columnNameConflict(String)
+    /// Two frames have incompatible column schemas for concatenation or comparison.
     case incompatibleSchema(expected: [String], actual: [String])
+    /// A cell value could not be converted to the requested ``DataType``.
     case invalidConversion(column: String, row: Int, type: DataType)
+    /// A rolling, lag, bin, or quantile parameter is outside the valid positive range.
     case invalidWindowSize(Int)
 
     /// A human-readable message describing the error.
@@ -189,6 +234,15 @@ public struct ColumnSummary: Equatable, Hashable, Sendable, Codable, CustomStrin
     /// The largest value, or `nil` when there are no numeric values.
     public let max: Double?
 
+    /// Creates a column summary with precomputed statistics.
+    ///
+    /// - Parameters:
+    ///   - count: Number of non-missing numeric values.
+    ///   - mean: Arithmetic mean, or `nil` if empty.
+    ///   - standardDeviation: Sample standard deviation, or `nil` if fewer than 2 values.
+    ///   - median: Median value, or `nil` if empty.
+    ///   - min: Minimum value, or `nil` if empty.
+    ///   - max: Maximum value, or `nil` if empty.
     init(
         count: Int,
         mean: Double?,
@@ -214,15 +268,25 @@ public struct ColumnSummary: Equatable, Hashable, Sendable, Codable, CustomStrin
 /// fewer than two numeric values. `first` and `last` return the first or last
 /// non-missing value in row order and work for any value type.
 public enum AggregateFunction: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Counts non-missing values of any type.
     case count
+    /// Computes the arithmetic sum of non-missing numeric values.
     case sum
+    /// Computes the arithmetic mean of non-missing numeric values.
     case mean
+    /// Finds the smallest non-missing numeric value.
     case min
+    /// Finds the largest non-missing numeric value.
     case max
+    /// Computes the 50th percentile (median) of non-missing numeric values.
     case median
+    /// Computes the unbiased sample variance (`ddof = 1`) of non-missing numeric values.
     case variance
+    /// Computes the unbiased sample standard deviation (`ddof = 1`) of non-missing numeric values.
     case standardDeviation
+    /// Returns the first non-missing value in row order.
     case first
+    /// Returns the last non-missing value in row order.
     case last
 
     /// The raw string value of the function, such as `"sum"`.
@@ -253,9 +317,13 @@ public struct Aggregation: Hashable, Sendable, Codable, CustomStringConvertible,
 
 /// The join strategy used to combine rows with matching key values.
 public enum JoinKind: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Keeps all rows from the left frame and fills unmatched right columns with `.missing`.
     case left
+    /// Keeps only rows whose join keys exist in both frames.
     case inner
+    /// Keeps all rows from the right frame and fills unmatched left columns with `.missing`.
     case right
+    /// Keeps all rows from both frames, filling unmatched columns on either side with `.missing`.
     case full
 
     /// The raw string value of the join kind, such as `"inner"`.
@@ -264,8 +332,11 @@ public enum JoinKind: String, Hashable, Sendable, Codable, CaseIterable, CustomS
 
 /// Which row to retain when removing duplicate rows.
 public enum DuplicateKeep: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Retains the first occurrence of each duplicate key tuple.
     case first
+    /// Retains the last occurrence of each duplicate key tuple.
     case last
+    /// Drops all rows that share a duplicate key tuple.
     case none
 
     /// The raw string value of the option, such as `"first"`.
@@ -330,7 +401,9 @@ public struct CSVReadOptions: Equatable, Sendable, CustomStringConvertible, Cust
 
 /// The direction used to order values in a data frame.
 public enum SortOrder: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
+    /// Orders values from smallest to largest (missing values last).
     case ascending
+    /// Orders values from largest to smallest (missing values last).
     case descending
 
     /// The raw string value of the order, such as `"ascending"`.
@@ -378,11 +451,17 @@ public struct DataRow: Equatable, Hashable, Sendable, Codable, CustomStringConve
     }
 
     /// Accesses a value by column name.
+    ///
+    /// - Parameter column: The column name to look up.
+    /// - Returns: The cell's ``DataValue``, or `nil` if `column` is not in the row.
     public subscript(_ column: String) -> DataValue? {
         values[column]
     }
 
     /// Accesses a value by zero-based column position.
+    ///
+    /// - Parameter position: A zero-based index into ``columnOrder``.
+    /// - Returns: The cell's ``DataValue``, or `.missing` if not present.
     public subscript(position: Int) -> DataValue {
         values[columnOrder[position]] ?? .missing
     }
@@ -402,22 +481,36 @@ public struct DataRow: Equatable, Hashable, Sendable, Codable, CustomStringConve
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: The stream to write to.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
 }
 
+/// Internal wrapper pairing a typed ``AnyColumn`` storage buffer with an optional pre-extracted ``NumericBuffer``.
 struct DataColumn: Equatable, Hashable, Sendable, Codable {
+    /// The column's name.
     let name: String
+    /// The underlying columnar storage buffer.
     let storage: any AnyColumn
+    /// Cached contiguous numeric buffer when the column holds numbers; `nil` for non-numeric columns.
     let numericBuffer: NumericBuffer?
+    /// Optional cached `[DataValue]` array when constructed directly from boxed values.
     private let _cachedValues: [DataValue]?
 
+    /// All cell values materialized as `[DataValue]`.
     var values: [DataValue] {
         if let cached = _cachedValues { return cached }
         return storage.toDataValues()
     }
 
+    /// Creates a column wrapper from a typed ``AnyColumn`` storage buffer.
+    ///
+    /// - Parameters:
+    ///   - storage: The underlying column buffer.
+    ///   - numericBuffer: Optional prebuilt numeric buffer.
+    ///   - cachedValues: Optional pre-materialized `[DataValue]` array.
     init(storage: any AnyColumn, numericBuffer: NumericBuffer? = nil, cachedValues: [DataValue]? = nil) {
         self.name = storage.name
         self.storage = storage
@@ -441,11 +534,21 @@ struct DataColumn: Equatable, Hashable, Sendable, Codable {
         self._cachedValues = cachedValues
     }
 
+    /// Creates a column by inferring the most specific columnar storage for `values`.
+    ///
+    /// - Parameters:
+    ///   - name: The column's name.
+    ///   - values: Boxed ``DataValue`` elements.
     init(name: String, values: [DataValue]) {
         let col = AnyColumnFactory.make(name: name, values: values)
         self.init(storage: col, cachedValues: values)
     }
 
+    /// Creates a contiguous `Double` column with no missing values.
+    ///
+    /// - Parameters:
+    ///   - name: The column's name.
+    ///   - numbers: Non-missing `Double` values.
     init(name: String, numbers: [Double]) {
         let floatCol = Float64Column(name: name, numbers: numbers)
         self.init(
@@ -455,6 +558,10 @@ struct DataColumn: Equatable, Hashable, Sendable, Codable {
         )
     }
 
+    /// Returns a copy of this column with `newName`.
+    ///
+    /// - Parameter newName: Replacement column name.
+    /// - Returns: A renamed `DataColumn` sharing the underlying buffers.
     func renamed(to newName: String) -> DataColumn {
         guard newName != name else { return self }
         let newStorage = storage.renamed(to: newName)
@@ -472,11 +579,13 @@ struct DataColumn: Equatable, Hashable, Sendable, Codable {
         return DataColumn(storage: newStorage, numericBuffer: newBuffer, cachedValues: _cachedValues)
     }
 
+    /// Coding keys used for `Codable` serialization of a column.
     enum CodingKeys: String, CodingKey {
         case name
         case values
     }
 
+    /// Decodes a column from its name and `[DataValue]` array.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedName = try container.decode(String.self, forKey: .name)
@@ -484,16 +593,19 @@ struct DataColumn: Equatable, Hashable, Sendable, Codable {
         self.init(name: decodedName, values: decodedValues)
     }
 
+    /// Encodes the column's name and `[DataValue]` array.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(values, forKey: .values)
     }
 
+    /// Returns `true` when two columns have the same name and cell values.
     static func == (lhs: DataColumn, rhs: DataColumn) -> Bool {
         lhs.name == rhs.name && lhs.values == rhs.values
     }
 
+    /// Hashes the column name and cell values into `hasher`.
     func hash(into hasher: inout Hasher) {
         hasher.combine(name)
         hasher.combine(values)
@@ -507,6 +619,7 @@ struct DataColumn: Equatable, Hashable, Sendable, Codable {
 /// contain a number (including quoted thousands separators and a leading dollar
 /// sign) are inferred as numeric; other non-empty fields remain strings.
 public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible, TextOutputStreamable {
+    /// Internal ordered list of columns.
     let columns: [DataColumn]
 
     /// The number of rows in the data frame.
@@ -522,6 +635,10 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     ///
     /// Empty or entirely missing columns have type `.unknown`; columns with
     /// more than one concrete value type have type `.mixed`.
+    ///
+    /// - Parameter name: The name of the column to inspect.
+    /// - Returns: The inferred ``DataType`` of the column.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `name` does not exist.
     public func dataType(of name: String) throws -> DataType {
         guard let col = columns.first(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -547,6 +664,10 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     }
 
     /// Selects all columns whose inferred type matches `type`.
+    ///
+    /// - Parameter type: The ``DataType`` to filter columns by.
+    /// - Returns: A new ``DataFrame`` containing only columns of `type`.
+    /// - Throws: ``DataFrameError/emptyColumns`` if no columns match `type`.
     public func select(columnsOfType type: DataType) throws -> DataFrame {
         let selected = try columns.filter { try dataType(of: $0.name) == type }
         guard !selected.isEmpty else { throw DataFrameError.emptyColumns }
@@ -557,6 +678,9 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     ///
     /// Dictionary input is sorted by column name because dictionary iteration order
     /// is not part of this API's column-order contract.
+    ///
+    /// - Parameter columns: Dictionary mapping column names to `[Double]` arrays.
+    /// - Throws: ``DataFrameError`` if `columns` is empty, a column name is empty, lengths differ, or a value is non-finite.
     public init(columns: [String: [Double]]) throws {
         try self.init(
             columns: columns
@@ -566,6 +690,9 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     }
 
     /// Creates a data frame from ordered named numeric columns.
+    ///
+    /// - Parameter columns: Ordered array of `(name, values)` numeric column tuples.
+    /// - Throws: ``DataFrameError`` if `columns` is empty, a name is empty or duplicated, lengths differ, or a value is non-finite.
     public init(columns: [(name: String, values: [Double])]) throws {
         guard !columns.isEmpty else {
             throw DataFrameError.emptyColumns
@@ -598,6 +725,9 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
     }
 
     /// Creates a data frame from ordered mixed-type columns.
+    ///
+    /// - Parameter columns: Ordered array of `(name, values)` mixed-type column tuples.
+    /// - Throws: ``DataFrameError`` if `columns` is empty, a name is empty or duplicated, lengths differ, or a numeric value is non-finite.
     @_disfavoredOverload
     public init(columns: [(name: String, values: [DataValue])]) throws {
         guard !columns.isEmpty else {
@@ -635,6 +765,10 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
         self.columnNames = columns.map(\.name)
     }
 
+    /// Creates a data frame directly from validated internal `DataColumn` instances.
+    ///
+    /// - Parameter dataColumns: Non-empty array of equal-length columns.
+    /// - Throws: ``DataFrameError`` if `dataColumns` is empty, a name is empty or duplicated, or lengths differ.
     init(dataColumns: [DataColumn]) throws {
         guard !dataColumns.isEmpty else {
             throw DataFrameError.emptyColumns
@@ -663,16 +797,28 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
         self.columnNames = dataColumns.map(\.name)
     }
 
+    /// Creates a data frame from an array of typed ``AnyColumn`` storage buffers.
+    ///
+    /// - Parameter storageColumns: Typed column storage buffers.
+    /// - Throws: ``DataFrameError`` if validation fails.
     init(storageColumns: [any AnyColumn]) throws {
         try self.init(dataColumns: storageColumns.map { DataColumn(storage: $0) })
     }
 
+    /// Returns a new frame containing the rows within `range`.
+    ///
+    /// - Parameter range: Contiguous row index range within `0..<rowCount`.
+    /// - Returns: A sliced ``DataFrame``.
     func rows(in range: Range<Int>) throws -> DataFrame {
         try DataFrame(
             storageColumns: columns.map { $0.storage.slice(range: range) }
         )
     }
 
+    /// Returns a new frame containing the rows at `indices` in the specified order.
+    ///
+    /// - Parameter indices: Row indices within `0..<rowCount`.
+    /// - Returns: A gathered ``DataFrame``.
     func rows(at indices: [Int]) throws -> DataFrame {
         if columns.count > 1 && indices.count >= 65_536 {
             let colCount = columns.count
@@ -690,6 +836,10 @@ public struct DataFrame: Equatable, Hashable, Sendable, Codable, CustomStringCon
         )
     }
 
+    /// Returns a new frame containing the rows whose bit in `mask` is `true`.
+    ///
+    /// - Parameter mask: A ``BitSet`` of length `rowCount`.
+    /// - Returns: A filtered ``DataFrame``.
     func rows(matching mask: BitSet) throws -> DataFrame {
         if columns.count > 1 && rowCount >= 65_536 {
             let colCount = columns.count
@@ -720,6 +870,8 @@ extension ColumnSummary {
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: The stream to write to.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -758,16 +910,28 @@ extension CSVReadOptions {
 
 /// Output slots written by `DispatchQueue.concurrentPerform`; each index is written by exactly one iteration.
 private struct DisjointSliceBuffer: @unchecked Sendable {
+    /// Raw buffer pointer holding sliced columns.
     let pointer: UnsafeMutablePointer<any AnyColumn>
 
+    /// Allocates uninitialized storage for `capacity` columns.
+    ///
+    /// - Parameter capacity: Number of column slots to allocate.
     init(capacity: Int) {
         pointer = .allocate(capacity: capacity)
     }
 
+    /// Initializes the slot at `index` with `value`.
+    ///
+    /// - Parameters:
+    ///   - index: Target slot index.
+    ///   - value: Sliced column to store.
     func initialize(at index: Int, to value: any AnyColumn) {
         (pointer + index).initialize(to: value)
     }
 
+    /// Deinitializes `count` slots and deallocates the underlying pointer.
+    ///
+    /// - Parameter count: Number of initialized slots.
     func release(count: Int) {
         pointer.deinitialize(count: count)
         pointer.deallocate()

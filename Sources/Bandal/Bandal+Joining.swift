@@ -1,5 +1,11 @@
 extension DataFrame {
     /// Performs a left join using values in the named key column.
+    ///
+    /// - Parameters:
+    ///   - other: Right-hand ``DataFrame`` to join with.
+    ///   - key: Shared key column name present in both frames.
+    /// - Returns: A left-joined ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `key` is missing in either frame or non-key column names conflict.
     public func leftJoin(_ other: DataFrame, on key: String) throws -> DataFrame {
         try join(other, on: key, kind: .left)
     }
@@ -8,6 +14,13 @@ extension DataFrame {
     ///
     /// Missing keys never match. Left and full joins retain unmatched left rows;
     /// right and full joins append unmatched right rows after left-side results.
+    ///
+    /// - Parameters:
+    ///   - other: Right-hand ``DataFrame`` to join with.
+    ///   - key: Shared key column name present in both frames.
+    ///   - kind: Join strategy (`.inner`, `.left`, `.right`, or `.full`).
+    /// - Returns: A joined ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `key` is missing in either frame or non-key column names conflict.
     public func join(
         _ other: DataFrame,
         on key: String,
@@ -374,6 +387,15 @@ extension DataFrame {
     /// columns present on both sides receive `suffixes` instead of throwing
     /// `columnNameConflict`. Missing keys never match. Right and full joins
     /// append unmatched right rows after the left-side results.
+    ///
+    /// - Parameters:
+    ///   - other: Right-hand ``DataFrame`` to join with.
+    ///   - leftOn: Key column names in the receiver (`self`).
+    ///   - rightOn: Corresponding key column names in `other`.
+    ///   - kind: Join strategy (`.inner`, `.left`, `.right`, or `.full`). Defaults to `.inner`.
+    ///   - suffixes: Suffixes appended to overlapping non-key column names from the left and right frames. Defaults to `("_x", "_y")`.
+    /// - Returns: A joined ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if key lists are empty or mismatched, a key column is missing, or suffixed names still collide.
     public func join(
         _ other: DataFrame,
         leftOn: [String],

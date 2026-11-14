@@ -5,11 +5,19 @@ extension DataFrame {
     ///
     /// Rows with a missing value in any grouping column are omitted. Group keys
     /// are sorted lexicographically in the same order as `names`.
+    ///
+    /// - Parameter names: Variadic list of grouping column names.
+    /// - Returns: A ``GroupedDataFrame`` ready for aggregation, transformation, or filtering.
+    /// - Throws: ``DataFrameError`` if `names` is empty, contains duplicates, or references an unknown column.
     public func groupBy(_ names: String...) throws -> GroupedDataFrame {
         try groupBy(names)
     }
 
     /// Groups rows by a list of columns for subsequent aggregation.
+    ///
+    /// - Parameter names: Array of grouping column names.
+    /// - Returns: A ``GroupedDataFrame`` ready for aggregation, transformation, or filtering.
+    /// - Throws: ``DataFrameError`` if `names` is empty, contains duplicates, or references an unknown column.
     public func groupBy(_ names: [String]) throws -> GroupedDataFrame {
         guard !names.isEmpty else { throw DataFrameError.emptyColumns }
         var uniqueNames = Set<String>()
@@ -24,6 +32,13 @@ extension DataFrame {
         return GroupedDataFrame(dataFrame: self, keys: names)
     }
 
+    /// Computes grouped aggregations over the specified key columns.
+    ///
+    /// - Parameters:
+    ///   - keys: Grouping column names.
+    ///   - aggregations: Aggregation descriptors to evaluate per group.
+    /// - Returns: A new ``DataFrame`` containing the sorted group keys and aggregated result columns.
+    /// - Throws: ``DataFrameError`` if `aggregations` is empty or any referenced column is invalid.
     func aggregate(
         keys: [String],
         aggregations: [Aggregation]
@@ -729,6 +744,13 @@ extension DataFrame {
     ///
     /// Numeric reductions of many rows run through MLX with a single scatter
     /// over group indices; small inputs and `median` use native Swift.
+    ///
+    /// - Parameters:
+    ///   - column: Source column values.
+    ///   - columnName: Name of the column for error reporting.
+    ///   - groups: Row index lists for each group.
+    ///   - function: Aggregation operation to apply.
+    /// - Returns: Aggregated ``DataValue`` per group.
     static func reduceGroups(
         _ column: [DataValue],
         columnName: String,
@@ -806,15 +828,24 @@ public struct GroupedDataFrame: CustomStringConvertible {
         "GroupedDataFrame(keys: \(keys.joined(separator: ", ")), rows: \(dataFrame.rowCount))"
     }
 
+    /// Underlying source frame.
     private let dataFrame: DataFrame
+    /// Column names used as grouping keys.
     private let keys: [String]
 
+    /// Creates a grouped view over `dataFrame` keyed by `keys`.
     fileprivate init(dataFrame: DataFrame, keys: [String]) {
         self.dataFrame = dataFrame
         self.keys = keys
     }
 
     /// Aggregates one column by group and returns the group key and result column.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the column to aggregate.
+    ///   - operation: The ``AggregateFunction`` to apply.
+    /// - Returns: A new ``DataFrame`` containing the group keys and aggregated column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or incompatible with `operation`.
     public func aggregate(
         _ column: String,
         using operation: AggregateFunction
@@ -823,6 +854,10 @@ public struct GroupedDataFrame: CustomStringConvertible {
     }
 
     /// Computes several aggregations in one grouping pass.
+    ///
+    /// - Parameter aggregations: Non-empty array of ``Aggregation`` specifications.
+    /// - Returns: A new ``DataFrame`` containing the group keys and aggregated columns.
+    /// - Throws: ``DataFrameError`` if `aggregations` is empty or any referenced column is invalid.
     public func aggregate(_ aggregations: [Aggregation]) throws -> DataFrame {
         try dataFrame.aggregate(keys: keys, aggregations: aggregations)
     }
@@ -832,6 +867,12 @@ public struct GroupedDataFrame: CustomStringConvertible {
     /// Rows with a missing grouping key receive a missing result. The result
     /// column is named `column_operation`; an existing column with that name
     /// causes an error rather than being overwritten.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the column to aggregate per group.
+    ///   - operation: The ``AggregateFunction`` to compute and broadcast.
+    /// - Returns: A new ``DataFrame`` with the broadcasted group statistic appended.
+    /// - Throws: ``DataFrameError`` if `column` is invalid or the output column name conflicts with an existing column.
     public func transform(
         _ column: String,
         using operation: AggregateFunction
@@ -864,6 +905,10 @@ public struct GroupedDataFrame: CustomStringConvertible {
     /// Filters groups using `predicate`, returning rows belonging to groups for
     /// which `predicate` returns `true` in their original row order (analogous
     /// to `df.groupby(...).filter(...)`).
+    ///
+    /// - Parameter predicate: Closure evaluated once per group sub-frame; returns `true` to retain the group's rows.
+    /// - Returns: A filtered ``DataFrame`` preserving original row order.
+    /// - Throws: Any error thrown by `predicate` or sub-frame construction.
     public func filter(
         _ predicate: (DataFrame) throws -> Bool
     ) throws -> DataFrame {
@@ -905,10 +950,13 @@ public struct GroupedDataFrame: CustomStringConvertible {
     }
 }
 
+/// Composite key representing a tuple of grouping column values.
 private struct GroupKey: Hashable {
+    /// Key values in grouping column order.
     let values: [DataValue]
 }
 
+/// Lexicographical comparison for two composite ``GroupKey`` instances.
 private func groupKeyIsOrderedBefore(_ lhs: GroupKey, _ rhs: GroupKey) -> Bool {
     for (left, right) in zip(lhs.values, rhs.values) {
         guard left != right else { continue }
@@ -918,6 +966,7 @@ private func groupKeyIsOrderedBefore(_ lhs: GroupKey, _ rhs: GroupKey) -> Bool {
 }
 
 extension AggregateFunction {
+    /// Canonical lowercase suffix used for default aggregated column names.
     var name: String {
         switch self {
         case .count: "count"

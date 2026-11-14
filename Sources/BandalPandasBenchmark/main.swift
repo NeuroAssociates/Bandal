@@ -1,6 +1,6 @@
 //
-//  benchmark.swift
-//  Bandal
+//  main.swift
+//  BandalPandasBenchmark
 //
 //  Created by Ned Park on 11/6/26.
 //
@@ -15,11 +15,19 @@
 import Bandal
 import Foundation
 
+/// Command-line options controlling benchmark dataset sizes, repetition count, and warm-up iterations.
 private struct Options {
+    /// Row counts to benchmark.
     var rows = [100_000, 1_000_000, 5_000_000]
+    /// Number of timed repetitions per workload.
     var repeats = 5
+    /// Number of untimed warm-up runs before measurement.
     var warmup = 2
 
+    /// Parses command-line arguments into benchmark options.
+    ///
+    /// - Parameter arguments: Full `CommandLine.arguments` array.
+    /// - Throws: ``OptionError`` if a flag is unknown, missing a value, or invalid.
     init(arguments: [String]) throws {
         var iterator = arguments.dropFirst().makeIterator()
         while let flag = iterator.next() {
@@ -42,20 +50,31 @@ private struct Options {
     }
 }
 
+/// Errors thrown when parsing command-line arguments for `BandalPandasBenchmark`.
 private enum OptionError: Error {
+    /// A flag requiring a value was provided without an argument.
     case missingValue(String)
+    /// A flag or its value could not be parsed.
     case invalid(String)
 }
 
+/// A single timed workload measurement across repetitions.
 private struct Measurement {
+    /// Number of rows in the benchmarked dataset.
     let rows: Int
+    /// Identifier of the benchmark workload.
     let workload: String
+    /// Execution mode label (`native`, `mlx_cpu`, `mlx_gpu`, or `mlx_gpu_float32`).
     let mode: String
+    /// Median execution time in milliseconds.
     let medianMilliseconds: Double
+    /// Minimum execution time in milliseconds.
     let minimumMilliseconds: Double
+    /// Numerical checksum used to verify parity across backends and pandas.
     let checksum: Double
 }
 
+/// Execution policies benchmarked for each workload.
 private let modes: [(name: String, policy: ExecutionPolicy)] = [
     ("native", .native),
     ("mlx_cpu", .cpu),
@@ -63,14 +82,28 @@ private let modes: [(name: String, policy: ExecutionPolicy)] = [
     ("mlx_gpu_float32", .gpuFloat32),
 ]
 
+/// Monotonic clock used to time benchmark iterations.
 private let clock = ContinuousClock()
 
+/// Converts a `Duration` to milliseconds as a `Double`.
+///
+/// - Parameter duration: Elapsed duration to convert.
+/// - Returns: Duration expressed in milliseconds.
 private func milliseconds(_ duration: Duration) -> Double {
     Double(duration.components.seconds) * 1_000
         + Double(duration.components.attoseconds) / 1_000_000_000_000_000
 }
 
 /// Times only `operation`; `checksum` runs after the clock stops.
+///
+/// - Parameters:
+///   - rows: Number of rows in the dataset.
+///   - workload: Name of the workload being measured.
+///   - mode: Execution mode name and policy.
+///   - options: Benchmark repetition and warm-up configuration.
+///   - operation: Closure performing the timed workload.
+///   - checksum: Closure computing a verification checksum from the result.
+/// - Returns: A ``Measurement`` summarizing the timing and checksum.
 private func measure<Result>(
     rows: Int,
     workload: String,
@@ -104,16 +137,27 @@ private func measure<Result>(
     }
 }
 
+/// Computes the sum of an array of `Double` values.
+///
+/// - Parameter values: Numeric values to sum.
+/// - Returns: Sum of all elements.
 private func total(_ values: [Double]) -> Double {
     values.reduce(0, +)
 }
 
+/// Sums the numeric values in the last column of `frame`.
+///
+/// - Parameter frame: The data frame whose last column is summed.
+/// - Returns: The sum of the last column, or `.nan` if the frame has no columns.
 private func lastColumnTotal(_ frame: DataFrame) throws -> Double {
     guard let name = frame.columnNames.last else { return .nan }
     return total(try frame.series(name).numbers)
 }
 
-/// Deterministic integer-valued data (exact in `Float32`), identical to benchmark.py.
+/// Deterministic integer-valued data (exact in `Float32`), identical to `benchmark.py`.
+///
+/// - Parameter rows: Number of rows to generate.
+/// - Returns: A tuple containing the primary data frame and the 100-row lookup table.
 private func makeData(rows: Int) throws -> (frame: DataFrame, lookup: DataFrame) {
     let a = (0..<rows).map { Double(($0 * 7_919) % 10_007) }
     let b = (0..<rows).map { Double(($0 * 104_729) % 10_009 + 1) }
@@ -134,6 +178,12 @@ private func makeData(rows: Int) throws -> (frame: DataFrame, lookup: DataFrame)
     return (frame, lookup)
 }
 
+/// Runs all benchmark workloads for a given row count across all execution modes.
+///
+/// - Parameters:
+///   - rows: Number of rows to generate and benchmark.
+///   - options: Warm-up and repetition options.
+/// - Returns: Collected measurements for every workload and execution mode.
 private func runWorkloads(rows: Int, options: Options) throws -> [Measurement] {
     let (frame, lookup) = try makeData(rows: rows)
     let numeric = try frame.select("a", "b", "c", "d")
@@ -213,6 +263,12 @@ private func runWorkloads(rows: Int, options: Options) throws -> [Measurement] {
     return results
 }
 
+/// Formats benchmark measurements as a JSON string.
+///
+/// - Parameters:
+///   - measurements: Measurements to serialize.
+///   - backend: Description of the active execution backend.
+/// - Returns: Formatted JSON payload.
 private func json(_ measurements: [Measurement], backend: String) -> String {
     let entries = measurements.map { m in
         "    {\"rows\": \(m.rows), \"workload\": \"\(m.workload)\", \"mode\": \"\(m.mode)\", "
@@ -235,4 +291,3 @@ do {
     FileHandle.standardError.write(Data("Benchmark failed: \(error)\n".utf8))
     exit(1)
 }
-

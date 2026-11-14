@@ -1,5 +1,9 @@
 extension DataFrame {
     /// Returns a numeric column as Swift values.
+    ///
+    /// - Parameter name: Name of the numeric column.
+    /// - Returns: Array of `Double` values in row order.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `name` does not exist, or ``DataFrameError/nonNumericColumn(_:)`` if the column contains non-numeric or missing values.
     public func column(_ name: String) throws -> [Double] {
         let buffer = try numericBuffer(in: name)
         guard !buffer.hasMissing else {
@@ -9,6 +13,10 @@ extension DataFrame {
     }
 
     /// Returns the values in a numeric, text, or mixed column.
+    ///
+    /// - Parameter name: Name of the column.
+    /// - Returns: Array of ``DataValue`` elements in row order.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `name` does not exist.
     public func values(in name: String) throws -> [DataValue] {
         guard let column = columns.first(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -17,6 +25,10 @@ extension DataFrame {
     }
 
     /// Returns a Boolean mask indicating which values in a column are missing.
+    ///
+    /// - Parameter name: Name of the column to inspect.
+    /// - Returns: Array of `Bool` values where `true` indicates `.missing`.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `name` does not exist.
     public func isMissing(in name: String) throws -> [Bool] {
         guard let column = columns.first(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -33,6 +45,8 @@ extension DataFrame {
     }
 
     /// Returns the number of missing values in each column.
+    ///
+    /// - Returns: Dictionary mapping each column name to its missing value count.
     public func missingCounts() -> [String: Int] {
         Dictionary(uniqueKeysWithValues: columns.map { column in
             (column.name, column.storage.nullCount)
@@ -43,6 +57,12 @@ extension DataFrame {
     ///
     /// When `columns` is omitted, every column is filled. Pass `.missing` to
     /// leave values unchanged. The source frame is never modified.
+    ///
+    /// - Parameters:
+    ///   - selectedColumns: Optional subset of column names to fill; `nil` fills all columns.
+    ///   - replacement: The ``DataValue`` used to replace `.missing` cells.
+    /// - Returns: A new ``DataFrame`` with missing values replaced.
+    /// - Throws: ``DataFrameError`` if `selectedColumns` is invalid or `replacement` is a non-finite number.
     public func fillMissing(
         in selectedColumns: [String]? = nil,
         with replacement: DataValue
@@ -100,6 +120,10 @@ extension DataFrame {
     /// Returns a copy with rows containing missing values removed.
     ///
     /// When `in` is omitted, a row is removed if any column is missing.
+    ///
+    /// - Parameter selectedColumns: Optional subset of columns to check for `.missing`; `nil` checks all columns.
+    /// - Returns: A new ``DataFrame`` containing only rows without missing values in `selectedColumns`.
+    /// - Throws: ``DataFrameError`` if `selectedColumns` is empty or contains an unknown column name.
     public func dropMissing(in selectedColumns: [String]? = nil) throws -> DataFrame {
         let names = try validatedColumnNames(selectedColumns)
         let selected = Set(names)
@@ -114,6 +138,7 @@ extension DataFrame {
         return try rows(matching: combinedNulls.inverted())
     }
 
+    /// Validates that `requestedNames` (when non-nil) is non-empty and every column exists in the frame.
     private func validatedColumnNames(_ requestedNames: [String]?) throws -> [String] {
         guard let requestedNames else { return columnNames }
         guard !requestedNames.isEmpty else { throw DataFrameError.emptyColumns }

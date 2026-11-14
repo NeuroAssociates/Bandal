@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-14
+
 ### Added
-- `Scripts/benchmark.sh`: pandas vs Bandal (native Swift, MLX CPU, MLX GPU) comparison that provisions a `uv` environment, builds the new `BandalPandasBenchmark` target, and prints computation-only timings with checksum verification (`benchmark.py`, `benchmark.swift`, `benchmark_compare.py`).
+- Swift Package Index (`.spi.yml`) configuration for hosted DocC documentation (`documentation_targets: [Bandal]`).
+- Multi-platform deployment support in `Package.swift` (`.macOS(.v14)`, `.iOS(.v17)`, `.tvOS(.v17)`, `.visionOS(.v1)`).
+- Comprehensive DocC documentation comments (`///`, `- Parameters:`, `- Returns:`, `- Throws:`) across all `Bandal`, `BandalBenchmarks`, and `BandalPandasBenchmark` source files, plus 8 DocC articles and complete symbol curation in `Sources/Bandal/Bandal.docc/`.
+- `Scripts/benchmark.sh`: pandas vs Bandal (native Swift, MLX CPU, MLX GPU) comparison that provisions a `uv` environment, builds the `BandalPandasBenchmark` target (`Sources/BandalPandasBenchmark/main.swift`), and prints computation-only timings with checksum verification.
 
 ### Performance
 - `rolling` / `expanding` `sum`, `mean`, `count` use a native single-pass O(n) kernel (Neumaier-compensated for sliding windows) instead of MLX prefix sums, now 2.6x (`rolling`) and 5x (`expanding`) faster than pandas on 1M–5M rows in all execution policies.
