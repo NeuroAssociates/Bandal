@@ -5,6 +5,10 @@ extension DataFrame {
     ///
     /// Sort keys are applied in order, ties preserve their input order, and
     /// missing values remain last in both ascending and descending order.
+    ///
+    /// - Parameter descriptors: Ordered list of ``SortDescriptor`` keys defining the sort order.
+    /// - Returns: A sorted ``DataFrame``.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if any sort column does not exist.
     public func sorted(by descriptors: [SortDescriptor]) throws -> DataFrame {
         guard !descriptors.isEmpty else { return self }
         guard rowCount > 1 else {
@@ -285,6 +289,7 @@ extension DataFrame {
         return executeRadixPasses(keys: &keys, hist: &hist, count: n)
     }
 
+    /// Executes the non-trivial 8-bit LSD radix passes over `keys` using precomputed byte histograms `hist`.
     private static func executeRadixPasses(
         keys: inout ContiguousArray<UInt64>,
         hist: inout [Int],
@@ -374,6 +379,7 @@ extension DataFrame {
     }
 }
 
+/// Returns `true` when `lhs` precedes `rhs` in Bandal's canonical `DataValue` ordering.
 func isOrderedBefore(_ lhs: DataValue, _ rhs: DataValue) -> Bool {
     switch (lhs, rhs) {
     case (.number(let left), .number(let right)):
@@ -391,6 +397,7 @@ func isOrderedBefore(_ lhs: DataValue, _ rhs: DataValue) -> Bool {
     }
 }
 
+/// Returns the inter-type rank used when comparing heterogeneous ``DataValue`` cases.
 private func valueOrder(_ value: DataValue) -> Int {
     switch value {
     case .number: 0

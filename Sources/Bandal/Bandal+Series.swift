@@ -13,6 +13,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     let storage: any AnyColumn
     /// Cached numeric buffer when all non-missing values are `.number`.
     let numericBuffer: NumericBuffer?
+    /// Optional cached `[DataValue]` array when initialized directly from `DataValue` elements.
     private let _cachedValues: [DataValue]?
 
     /// The values in row order.
@@ -21,6 +22,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Creates a series from a name and values.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the series.
+    ///   - values: Ordered ``DataValue`` elements.
     public init(name: String, values: [DataValue]) {
         self.name = name
         self._cachedValues = values
@@ -43,6 +48,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Creates a numeric series from `Double` values without boxing into `[DataValue]`.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the series.
+    ///   - numbers: Ordered finite `Double` values.
     public init(name: String, numbers: [Double]) {
         let floatCol = Float64Column(
             name: name,
@@ -56,6 +65,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Creates a numeric series from optional `Double?` values (`nil` becomes `.missing`).
+    ///
+    /// - Parameters:
+    ///   - name: Name of the series.
+    ///   - values: Ordered optional `Double` values where `nil` or non-finite values become `.missing`.
     public init(name: String, values: [Double?]) {
         var arr = ContiguousArray<Double>(repeating: 0.0, count: values.count)
         var nulls = BitSet(count: values.count)
@@ -73,6 +86,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         self._cachedValues = nil
     }
 
+    /// Creates a ``Series`` directly from typed columnar storage and an optional pre-built numeric buffer.
     init(storage: any AnyColumn, numericBuffer: NumericBuffer? = nil, cachedValues: [DataValue]? = nil) {
         self.name = storage.name
         self.storage = storage
@@ -95,6 +109,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         }
     }
 
+    /// Wraps an internal ``DataColumn`` as a ``Series`` in $O(1)$ without copying storage.
     init(column: DataColumn) {
         self.name = column.name
         self.storage = column.storage
@@ -102,6 +117,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         self._cachedValues = nil
     }
 
+    /// Returns a copy of the series with its column name changed to `newName`.
     func renamed(to newName: String) -> Series {
         guard newName != name else { return self }
         let newStorage = storage.renamed(to: newName)
@@ -116,6 +132,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
         return Series(storage: newStorage, numericBuffer: newBuffer, cachedValues: _cachedValues)
     }
 
+    /// Coding keys used for `Codable` serialization of ``Series``.
     enum CodingKeys: String, CodingKey {
         case name
         case values
@@ -123,6 +140,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
     /// Creates a series by decoding its `name` and `values`.
     ///
+    /// - Parameter decoder: The decoder to read data from.
     /// - Throws: A decoding error if either key is missing or malformed.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -133,6 +151,7 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
     /// Encodes the series' `name` and `values`.
     ///
+    /// - Parameter encoder: The encoder to write data to.
     /// - Throws: An encoding error if a value cannot be encoded.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -150,6 +169,8 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Hashes the series' name and values into the given hasher.
+    ///
+    /// - Parameter hasher: The hasher to use when combining the components of this instance.
     public func hash(into hasher: inout Hasher) {
         hasher.combine(name)
         hasher.combine(values)
@@ -204,11 +225,17 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Accesses the element at `index`.
+    ///
+    /// - Parameter index: Zero-based element position.
+    /// - Returns: The ``DataValue`` at `index`.
     public subscript(index: Int) -> DataValue {
         storage.value(at: index)
     }
 
     /// Reduces the numeric values with `function`; `.missing` when undefined.
+    ///
+    /// - Parameter function: The ``AggregateFunction`` to apply.
+    /// - Returns: The reduced ``DataValue``, or `.missing` if undefined.
     public func reduced(using function: AggregateFunction) -> DataValue {
         switch function {
         case .count:
@@ -229,27 +256,44 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Sum of non-missing numeric values (`nil` if no numeric values).
+    ///
+    /// - Returns: The sum of all non-missing numbers, or `nil` when empty.
     public func sum() -> Double? { DataFrame.reduce(numbers, .sum) }
 
     /// Arithmetic mean of non-missing numeric values (`nil` if no numeric values).
+    ///
+    /// - Returns: The arithmetic mean, or `nil` when empty.
     public func mean() -> Double? { DataFrame.reduce(numbers, .mean) }
 
     /// Minimum of non-missing numeric values (`nil` if no numeric values).
+    ///
+    /// - Returns: The minimum value, or `nil` when empty.
     public func min() -> Double? { DataFrame.reduce(numbers, .min) }
 
     /// Maximum of non-missing numeric values (`nil` if no numeric values).
+    ///
+    /// - Returns: The maximum value, or `nil` when empty.
     public func max() -> Double? { DataFrame.reduce(numbers, .max) }
 
     /// Median of non-missing numeric values (`nil` if no numeric values).
+    ///
+    /// - Returns: The 50th percentile, or `nil` when empty.
     public func median() -> Double? { DataFrame.reduce(numbers, .median) }
 
     /// Sample variance (`ddof = 1`) of non-missing numeric values (`nil` if `< 2` values).
+    ///
+    /// - Returns: The unbiased sample variance, or `nil` when fewer than 2 numeric values exist.
     public func variance() -> Double? { DataFrame.reduce(numbers, .variance) }
 
     /// Sample standard deviation (`ddof = 1`) of non-missing numeric values (`nil` if `< 2` values).
+    ///
+    /// - Returns: The unbiased sample standard deviation, or `nil` when fewer than 2 numeric values exist.
     public func standardDeviation() -> Double? { DataFrame.reduce(numbers, .standardDeviation) }
 
     /// Linear-interpolation quantile at `probability` in `0...1` (`nil` if no numeric values).
+    ///
+    /// - Parameter probability: Fractional probability in `0...1`.
+    /// - Returns: The interpolated quantile value, or `nil` when no numeric values exist.
     public func quantile(_ probability: Double) -> Double? {
         let nums = numbers
         guard !nums.isEmpty else { return nil }
@@ -258,6 +302,8 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Most frequent non-missing values in first-appearance order.
+    ///
+    /// - Returns: An array of the modal ``DataValue`` elements (multiple elements when tied).
     public func mode() -> [DataValue] {
         var counts: [DataValue: Int] = [:]
         for value in values where value != .missing {
@@ -268,18 +314,24 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Summary statistics when the series is numeric.
+    ///
+    /// - Returns: A ``ColumnSummary``, or `nil` if the series is non-numeric or has no values.
     public func summary() -> ColumnSummary? {
         guard let buffer = numericBuffer, buffer.nonMissingCount > 0 else { return nil }
         return NumericEngine.summaryMoments(of: buffer)
     }
 
     /// Structured statistics (including quartiles) when the series is numeric.
+    ///
+    /// - Returns: A ``ColumnStatistics`` instance, or `nil` if the series is non-numeric or has no values.
     public func statistics() -> ColumnStatistics? {
         guard let buffer = numericBuffer, buffer.nonMissingCount > 0 else { return nil }
         return ColumnStatistics(buffer: buffer)
     }
 
     /// Renders a Pandas-style descriptive summary of the series.
+    ///
+    /// - Returns: A formatted summary table string.
     public func describe() -> String {
         if let stats = statistics() {
             func f(_ v: Double?) -> String { v.map { String(format: "%.6g", $0) } ?? "NaN" }
@@ -319,12 +371,16 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Distinct non-missing values in first-appearance order.
+    ///
+    /// - Returns: Ordered unique ``DataValue`` elements.
     public func unique() -> [DataValue] {
         var seen = Set<DataValue>()
         return values.filter { $0 != .missing && seen.insert($0).inserted }
     }
 
     /// The number of distinct non-missing values.
+    ///
+    /// - Returns: Count of distinct non-missing values.
     public func uniqueCount() -> Int {
         if let catCol = storage as? CategoricalColumn {
             if !catCol.hasNulls {
@@ -345,6 +401,9 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     ///
     /// Ties keep first-appearance order. The result has `value` and `count`
     /// columns.
+    ///
+    /// - Returns: A two-column ``DataFrame`` (`value` and `count`).
+    /// - Throws: ``DataFrameError`` if constructing the result frame fails.
     public func valueCounts() throws -> DataFrame {
         var counts: [DataValue: Int] = [:]
         for value in values where value != .missing { counts[value, default: 0] += 1 }
@@ -361,11 +420,20 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a Boolean mask indicating whether each element belongs to `candidates`.
+    ///
+    /// - Parameter candidates: Set of target ``DataValue`` values.
+    /// - Returns: An array of Booleans of length ``count``.
     public func isin(_ candidates: Set<DataValue>) -> [Bool] {
         (0..<count).map { candidates.contains(storage.value(at: $0)) }
     }
 
     /// Returns a Boolean mask indicating whether each numeric element lies in `lower...upper`.
+    ///
+    /// - Parameters:
+    ///   - lower: Lower bound of the interval.
+    ///   - upper: Upper bound of the interval.
+    ///   - inclusive: When `true`, includes `lower` and `upper`; when `false`, uses strict inequalities.
+    /// - Returns: An array of Booleans of length ``count``.
     public func between(lower: Double, upper: Double, inclusive: Bool = true) -> [Bool] {
         if let buffer = numericBuffer {
             let vals = buffer.floatColumn.values
@@ -387,11 +455,20 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a new series with each element transformed by `transform`.
+    ///
+    /// - Parameter transform: Closure mapping each ``DataValue`` to a new ``DataValue``.
+    /// - Returns: A transformed ``Series`` with the same name.
     public func mapped(_ transform: (DataValue) throws -> DataValue) rethrows -> Series {
         Series(name: name, values: try values.map(transform))
     }
 
     /// Returns a copy with numeric values clamped to `lower...upper`.
+    ///
+    /// - Parameters:
+    ///   - lower: Optional minimum bound.
+    ///   - upper: Optional maximum bound.
+    /// - Returns: A new ``Series`` with clamped numeric values.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func clipped(lower: Double? = nil, upper: Double? = nil) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -412,6 +489,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy with numeric values rounded to `decimals` decimal places.
+    ///
+    /// - Parameter decimals: Number of fractional decimal digits to round to. Defaults to `0`.
+    /// - Returns: A new ``Series`` with rounded values.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func rounded(decimals: Int = 0) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -430,6 +511,9 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy with the absolute value of each numeric element.
+    ///
+    /// - Returns: A new ``Series`` containing non-negative magnitudes.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func abs() throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -447,6 +531,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy with cumulative `sum`, `product`, `minimum`, or `maximum`.
+    ///
+    /// - Parameter function: The ``CumulativeFunction`` to evaluate.
+    /// - Returns: A new ``Series`` with cumulative values.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func cumulative(using function: CumulativeFunction) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -479,6 +567,11 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy shifted by `periods` positions, filling vacated entries with `fill`.
+    ///
+    /// - Parameters:
+    ///   - periods: Number of positions to shift (positive shifts down, negative shifts up). Defaults to `1`.
+    ///   - fill: Value used to populate vacated positions. Defaults to `.missing`.
+    /// - Returns: A shifted ``Series``.
     public func shifted(by periods: Int = 1, fillWith fill: DataValue = .missing) -> Series {
         if let buffer = numericBuffer, fill == .missing {
             let srcVals = buffer.floatColumn.values
@@ -505,6 +598,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns the difference from `periods` elements earlier.
+    ///
+    /// - Parameter periods: Lag offset in rows. Defaults to `1`.
+    /// - Returns: A new ``Series`` holding first differences `x[t] - x[t - periods]`.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func difference(periods: Int = 1) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -531,6 +628,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns the fractional change from `periods` elements earlier.
+    ///
+    /// - Parameter periods: Lag offset in rows. Defaults to `1`.
+    /// - Returns: A new ``Series`` holding fractional changes `x[t] / x[t - periods] - 1`.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func percentChange(periods: Int = 1) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -559,6 +660,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Computes average-tie ranks (1-based) for numeric values, keeping `.missing` as `.missing`.
+    ///
+    /// - Parameter ascending: When `true`, smallest values receive rank `1.0`; when `false`, largest values receive rank `1.0`.
+    /// - Returns: A new ``Series`` containing 1-based average-tie ranks.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func ranked(ascending: Bool = true) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -595,6 +700,12 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     // MARK: Vectorized arithmetic
 
     /// Applies an arithmetic operation with a scalar `Double` to every element.
+    ///
+    /// - Parameters:
+    ///   - operation: The ``ArithmeticOperator`` to apply.
+    ///   - scalar: Right-hand scalar operand.
+    /// - Returns: A new ``Series`` with the result of the scalar arithmetic operation.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func applying(_ operation: ArithmeticOperator, scalar: Double) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -646,6 +757,12 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Applies an element-wise arithmetic operation with another `Series` of equal length.
+    ///
+    /// - Parameters:
+    ///   - operation: The ``ArithmeticOperator`` to apply.
+    ///   - other: Right-hand ``Series`` operand of equal length.
+    /// - Returns: A new ``Series`` with the element-wise result.
+    /// - Throws: ``DataFrameError`` if lengths differ or either series is non-numeric.
     public func applying(_ operation: ArithmeticOperator, other: Series) throws -> Series {
         guard count == other.count else {
             throw DataFrameError.unequalColumnLengths(
@@ -736,6 +853,10 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     // MARK: Missing value helpers
 
     /// Returns a copy where `.missing` elements are replaced with `replacement`.
+    ///
+    /// - Parameter replacement: Replacement ``DataValue`` for missing entries.
+    /// - Returns: A new ``Series`` with missing values replaced.
+    /// - Throws: ``DataFrameError/nonFiniteValue(column:row:)`` if `replacement` is a non-finite number.
     public func fillMissing(with replacement: DataValue) throws -> Series {
         if case .number(let n) = replacement, !n.isFinite {
             throw DataFrameError.nonFiniteValue(column: name, row: 0)
@@ -756,6 +877,8 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy with `.missing` elements removed.
+    ///
+    /// - Returns: A compacted ``Series`` containing only non-missing elements.
     public func dropMissing() -> Series {
         if !storage.hasNulls {
             return self
@@ -765,6 +888,8 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy where `.missing` elements are filled with the closest earlier non-missing value.
+    ///
+    /// - Returns: A forward-filled ``Series``.
     public func forwardFilled() -> Series {
         if !storage.hasNulls {
             return self
@@ -795,6 +920,8 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     }
 
     /// Returns a copy where `.missing` elements are filled with the closest later non-missing value.
+    ///
+    /// - Returns: A backward-filled ``Series``.
     public func backwardFilled() -> Series {
         if !storage.hasNulls {
             return self
@@ -838,6 +965,8 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -845,7 +974,14 @@ public struct Series: Equatable, Hashable, Sendable, Codable, CustomStringConver
 
 /// Element-wise cumulative operations.
 public enum CumulativeFunction: String, Hashable, Sendable, Codable, CaseIterable, CustomStringConvertible {
-    case sum, product, minimum, maximum
+    /// Running cumulative sum (`cumsum`).
+    case sum
+    /// Running cumulative product (`cumprod`).
+    case product
+    /// Running cumulative minimum (`cummin`).
+    case minimum
+    /// Running cumulative maximum (`cummax`).
+    case maximum
 
     /// The lowercase name of the function.
     public var description: String { rawValue }
@@ -853,6 +989,10 @@ public enum CumulativeFunction: String, Hashable, Sendable, Codable, CaseIterabl
 
 extension DataFrame {
     /// Returns one column as a ``Series`` in $O(1)$ without unboxing column storage.
+    ///
+    /// - Parameter name: Name of the column to retrieve.
+    /// - Returns: A ``Series`` backed by the column's underlying storage.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `name` does not exist.
     public func series(_ name: String) throws -> Series {
         guard let column = columns.first(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -861,16 +1001,29 @@ extension DataFrame {
     }
 
     /// Returns one column as a ``Series``, or `nil` when it does not exist.
+    ///
+    /// - Parameter name: Name of the column to retrieve.
+    /// - Returns: The requested ``Series``, or `nil` if not found.
     public subscript(name: String) -> Series? {
         try? series(name)
     }
 
     /// Returns a copy with a new or replaced column from a ``Series``.
+    ///
+    /// - Parameter series: The ``Series`` to insert or replace by its ``Series/name``.
+    /// - Returns: A new ``DataFrame`` containing `series`.
+    /// - Throws: ``DataFrameError`` if the series length does not match ``rowCount``.
     public func withColumn(_ series: Series) throws -> DataFrame {
         try withColumn(storage: series.storage)
     }
 
     /// Returns a copy with a new or replaced numeric column from `Double` values.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the column to insert or replace.
+    ///   - numbers: Finite `Double` values for each row.
+    /// - Returns: A new ``DataFrame`` containing the numeric column.
+    /// - Throws: ``DataFrameError`` if `numbers` contains non-finite values or has an invalid length.
     public func withColumn(name: String, numbers: [Double]) throws -> DataFrame {
         for (row, num) in numbers.enumerated() where !num.isFinite {
             throw DataFrameError.nonFiniteValue(column: name, row: row)
@@ -884,6 +1037,10 @@ extension DataFrame {
     }
 
     /// Returns a copy without the named columns.
+    ///
+    /// - Parameter names: Names of the columns to remove.
+    /// - Returns: A new ``DataFrame`` with `names` removed.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if any name does not exist, or ``DataFrameError/emptyColumns`` if all columns are dropped.
     public func drop(columns names: [String]) throws -> DataFrame {
         for name in names where !columnNames.contains(name) {
             throw DataFrameError.columnNotFound(name)
@@ -895,11 +1052,23 @@ extension DataFrame {
     }
 
     /// Returns the `count` rows with the largest values in `column`.
+    ///
+    /// - Parameters:
+    ///   - count: Maximum number of top rows to return.
+    ///   - column: Name of the column to sort by in descending order.
+    /// - Returns: A new ``DataFrame`` containing up to `count` largest rows.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `column` does not exist.
     public func largest(_ count: Int, by column: String) throws -> DataFrame {
         try sorted(by: [SortDescriptor(column, order: .descending)]).head(count)
     }
 
     /// Returns the `count` rows with the smallest values in `column`.
+    ///
+    /// - Parameters:
+    ///   - count: Maximum number of bottom rows to return.
+    ///   - column: Name of the column to sort by in ascending order.
+    /// - Returns: A new ``DataFrame`` containing up to `count` smallest rows.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `column` does not exist.
     public func smallest(_ count: Int, by column: String) throws -> DataFrame {
         try sorted(by: [SortDescriptor(column, order: .ascending)]).head(count)
     }
@@ -907,6 +1076,10 @@ extension DataFrame {
     /// Reduces every numeric column to one row using `function`.
     ///
     /// The result has a single row; non-numeric columns are omitted.
+    ///
+    /// - Parameter function: The ``AggregateFunction`` to apply to each numeric column.
+    /// - Returns: A single-row ``DataFrame`` containing the reduced numeric columns.
+    /// - Throws: ``DataFrameError/emptyColumns`` if the frame has no numeric columns.
     public func reduced(using function: AggregateFunction) throws -> DataFrame {
         let numeric = try columnNames.filter { try dataType(of: $0) == .number }
         guard !numeric.isEmpty else { throw DataFrameError.emptyColumns }
@@ -917,6 +1090,10 @@ extension DataFrame {
 
     /// Computes the given `probability` quantile (`0...1`) for every numeric column
     /// as a single-row `DataFrame`.
+    ///
+    /// - Parameter probability: Fractional probability in `0...1`.
+    /// - Returns: A single-row ``DataFrame`` containing the quantile for each numeric column.
+    /// - Throws: ``DataFrameError/emptyColumns`` if the frame has no numeric columns.
     public func quantile(_ probability: Double) throws -> DataFrame {
         let numeric = try columnNames.filter { try dataType(of: $0) == .number }
         guard !numeric.isEmpty else { throw DataFrameError.emptyColumns }
@@ -930,6 +1107,9 @@ extension DataFrame {
     ///
     /// Large frames compute the covariance matrix via MLX (`float64` on CPU
     /// stream); rows where either column is missing are ignored for that pair.
+    ///
+    /// - Returns: A square ``DataFrame`` whose columns and rows correspond to the numeric columns.
+    /// - Throws: ``DataFrameError/emptyColumns`` if the frame has no numeric columns.
     public func covariance() throws -> DataFrame {
         try computePairwiseMatrix(correlation: false)
     }
@@ -938,10 +1118,14 @@ extension DataFrame {
     ///
     /// Large frames compute the correlation matrix via MLX (`float64` on CPU
     /// stream); rows where either column is missing are ignored for that pair.
+    ///
+    /// - Returns: A square ``DataFrame`` whose columns and rows correspond to the numeric columns.
+    /// - Throws: ``DataFrameError/emptyColumns`` if the frame has no numeric columns.
     public func correlation() throws -> DataFrame {
         try computePairwiseMatrix(correlation: true)
     }
 
+    /// Computes either the pairwise sample covariance or Pearson correlation matrix across all numeric columns.
     private func computePairwiseMatrix(correlation: Bool) throws -> DataFrame {
         let numericColumns = columns.filter { (try? dataType(of: $0.name)) == .number }
         guard !numericColumns.isEmpty else { throw DataFrameError.emptyColumns }
@@ -1102,6 +1286,7 @@ extension DataFrame {
         }
     }
 
+    /// Evaluates `body` over all pairs of numeric columns using aligned non-missing values.
     private func pairwise(_ body: ([Double], [Double]) -> Double?) throws -> DataFrame {
         let numeric = try columnNames.filter { try dataType(of: $0) == .number }
         guard !numeric.isEmpty else { throw DataFrameError.emptyColumns }
@@ -1129,6 +1314,12 @@ extension DataFrame {
     /// Missing values stay missing and do not reset the accumulator. Large
     /// columns run through MLX (`cumsum`, `cumprod`, `cummin`, `cummax`) on the
     /// CPU stream in `float64`.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to transform.
+    ///   - function: The ``CumulativeFunction`` to apply.
+    /// - Returns: A new ``DataFrame`` with `column` replaced by its cumulative values.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func cumulative(_ column: String, using function: CumulativeFunction) throws -> DataFrame {
         let updated = try series(column).cumulative(using: function)
         return try replacingColumn(column, withStorage: updated.storage)
@@ -1136,36 +1327,71 @@ extension DataFrame {
 
     /// Returns a copy where `column` is shifted down by `periods` rows
     /// (up when negative), filling vacated rows with missing values.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the column to shift.
+    ///   - periods: Number of rows to shift. Defaults to `1`.
+    /// - Returns: A new ``DataFrame`` with `column` shifted.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `column` does not exist.
     public func shifted(_ column: String, by periods: Int = 1) throws -> DataFrame {
         let updated = try series(column).shifted(by: periods)
         return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Returns a copy where `column` holds the difference from `periods` rows earlier.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column.
+    ///   - periods: Lag offset in rows. Defaults to `1`.
+    /// - Returns: A new ``DataFrame`` with `column` replaced by its differences.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func difference(_ column: String, periods: Int = 1) throws -> DataFrame {
         let updated = try series(column).difference(periods: periods)
         return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Returns a copy where `column` holds the fractional change from `periods` rows earlier.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column.
+    ///   - periods: Lag offset in rows. Defaults to `1`.
+    /// - Returns: A new ``DataFrame`` with `column` replaced by its fractional changes.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func percentChange(_ column: String, periods: Int = 1) throws -> DataFrame {
         let updated = try series(column).percentChange(periods: periods)
         return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Limits numeric values of `column` to `lower...upper`; either bound may be `nil`.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to clip.
+    ///   - lower: Optional minimum bound.
+    ///   - upper: Optional maximum bound.
+    /// - Returns: A new ``DataFrame`` with `column` clipped.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func clipped(_ column: String, lower: Double? = nil, upper: Double? = nil) throws -> DataFrame {
         let updated = try series(column).clipped(lower: lower, upper: upper)
         return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Rounds numeric values of `column` to `decimals` places.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to round.
+    ///   - decimals: Number of fractional decimal digits. Defaults to `0`.
+    /// - Returns: A new ``DataFrame`` with `column` rounded.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func rounded(_ column: String, decimals: Int = 0) throws -> DataFrame {
         let updated = try series(column).rounded(decimals: decimals)
         return try replacingColumn(column, withStorage: updated.storage)
     }
 
     /// Replaces a numeric column with the absolute value of each entry.
+    ///
+    /// - Parameter column: Name of the numeric column.
+    /// - Returns: A new ``DataFrame`` with `column` replaced by its absolute values.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func abs(_ column: String) throws -> DataFrame {
         let updated = try series(column).abs()
         return try replacingColumn(column, withStorage: updated.storage)
@@ -1175,6 +1401,13 @@ extension DataFrame {
     ///
     /// When `outputColumn` is `nil`, the ranked values replace `column`;
     /// otherwise they are appended or replace `outputColumn`.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to rank.
+    ///   - ascending: When `true`, smallest values receive rank `1.0`.
+    ///   - outputColumn: Optional destination column name; `nil` replaces `column` in place.
+    /// - Returns: A new ``DataFrame`` containing the ranked column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func ranked(
         _ column: String,
         ascending: Bool = true,
@@ -1187,6 +1420,14 @@ extension DataFrame {
 
     /// Combines two numeric columns element-wise with `operation` (+, -, *, /)
     /// and writes the result to `outputColumn`.
+    ///
+    /// - Parameters:
+    ///   - leftColumn: Name of the left numeric column.
+    ///   - rightColumn: Name of the right numeric column.
+    ///   - operation: The ``ArithmeticOperator`` to apply element-wise.
+    ///   - outputColumn: Name of the output column to insert or replace.
+    /// - Returns: A new ``DataFrame`` with `outputColumn` containing the combined values.
+    /// - Throws: ``DataFrameError`` if either input column is missing or non-numeric.
     public func combining(
         _ leftColumn: String,
         _ rightColumn: String,
@@ -1201,6 +1442,14 @@ extension DataFrame {
 
     /// Applies a scalar arithmetic operation to `column` and writes the result
     /// to `outputColumn` (or replaces `column` when `outputColumn` is `nil`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to scale.
+    ///   - scalar: Right-hand scalar operand.
+    ///   - operation: The ``ArithmeticOperator`` to apply. Defaults to `.multiply`.
+    ///   - outputColumn: Optional destination column name; `nil` replaces `column` in place.
+    /// - Returns: A new ``DataFrame`` containing the scaled column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func scaling(
         _ column: String,
         by scalar: Double,
@@ -1213,6 +1462,8 @@ extension DataFrame {
     }
 
     /// Number of distinct non-missing values in each column (similar to `df.nunique()`).
+    ///
+    /// - Returns: A dictionary mapping each column name to its distinct non-missing count.
     public func uniqueCounts() -> [String: Int] {
         Dictionary(
             uniqueKeysWithValues: columns.map { column in
@@ -1222,12 +1473,23 @@ extension DataFrame {
     }
 
     /// Frequencies of non-missing values in `column`, most frequent first.
+    ///
+    /// - Parameter column: Name of the column to count values in.
+    /// - Returns: A two-column ``DataFrame`` (`value` and `count`).
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `column` does not exist.
     public func valueCounts(of column: String) throws -> DataFrame {
         try series(column).valueCounts()
     }
 
     /// Replaces occurrences of `target` with `replacement` in the specified
     /// `columns` (or across all columns when `columns` is `nil`).
+    ///
+    /// - Parameters:
+    ///   - target: Value to search for.
+    ///   - replacement: Replacement ``DataValue``.
+    ///   - targetColumns: Optional subset of column names to modify; `nil` modifies all columns.
+    /// - Returns: A new ``DataFrame`` with matching values replaced.
+    /// - Throws: ``DataFrameError`` if `replacement` is a non-finite number or any column in `targetColumns` does not exist.
     public func replacing(
         _ target: DataValue,
         with replacement: DataValue,
@@ -1255,6 +1517,9 @@ extension DataFrame {
     }
 
     /// Fills each missing value with the closest earlier non-missing value.
+    ///
+    /// - Returns: A forward-filled ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if constructing the result frame fails.
     public func forwardFilled() throws -> DataFrame {
         let updated = columns.map { column -> DataColumn in
             guard column.storage.hasNulls else { return column }
@@ -1264,6 +1529,9 @@ extension DataFrame {
     }
 
     /// Fills each missing value with the closest later non-missing value.
+    ///
+    /// - Returns: A backward-filled ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if constructing the result frame fails.
     public func backwardFilled() throws -> DataFrame {
         let updated = columns.map { column -> DataColumn in
             guard column.storage.hasNulls else { return column }
@@ -1273,6 +1541,9 @@ extension DataFrame {
     }
 
     /// Returns a Boolean frame that is `true` where the source is missing.
+    ///
+    /// - Returns: A ``DataFrame`` of `.boolean` columns indicating missingness at each cell.
+    /// - Throws: ``DataFrameError`` if constructing the result frame fails.
     public func missingMask() throws -> DataFrame {
         try DataFrame(storageColumns: columns.map { column in
             BooleanColumn(
@@ -1284,6 +1555,8 @@ extension DataFrame {
     }
 
     /// Returns a structured version of ``info()``.
+    ///
+    /// - Returns: A ``DataFrameInfo`` value describing row count, columns, and estimated memory usage.
     public func infoSummary() -> DataFrameInfo {
         var totalMemory = 0
         let columnInfos = columns.map { column -> DataFrameInfo.Column in
@@ -1315,6 +1588,7 @@ extension DataFrame {
         )
     }
 
+    /// Replaces the column named `name` with `values` in place.
     func replacingColumn(_ name: String, with values: [DataValue]) throws -> DataFrame {
         guard let idx = columns.firstIndex(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -1324,6 +1598,7 @@ extension DataFrame {
         return try DataFrame(dataColumns: updated)
     }
 
+    /// Replaces the column named `name` with typed columnar `storage` in place.
     func replacingColumn(_ name: String, withStorage storage: any AnyColumn) throws -> DataFrame {
         guard let idx = columns.firstIndex(where: { $0.name == name }) else {
             throw DataFrameError.columnNotFound(name)
@@ -1346,6 +1621,11 @@ public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStrin
         public let type: DataType
 
         /// Creates per-column information.
+        ///
+        /// - Parameters:
+        ///   - name: The column name.
+        ///   - nonMissingCount: Number of non-missing values in the column.
+        ///   - type: The inferred ``DataType`` of the column.
         public init(name: String, nonMissingCount: Int, type: DataType) {
             self.name = name
             self.nonMissingCount = nonMissingCount
@@ -1377,6 +1657,8 @@ public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStrin
     }
 
     /// Renders a multi-line summary of the row count and each column's name, non-null count, and type.
+    ///
+    /// - Returns: A formatted plain-text summary.
     public func describe() -> String {
         var lines = ["DataFrame: \(rowCount) rows x \(columns.count) columns"]
         for (index, column) in columns.enumerated() {
@@ -1391,6 +1673,8 @@ public struct DataFrameInfo: Equatable, Hashable, Sendable, Codable, CustomStrin
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }

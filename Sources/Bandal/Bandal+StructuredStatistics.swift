@@ -12,8 +12,11 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
     /// Underlying contiguous storage: one `Double` per row. Placeholder `0` is
     /// used for missing rows; callers must consult `nullBitmap` / `isMissing`.
     let floatColumn: Float64Column
+    /// Number of non-missing elements in `floatColumn`.
     let nonMissingCount: Int
+    /// Whether at least one row in `floatColumn` is marked missing.
     let hasMissing: Bool
+    /// Optional pre-compacted array of non-missing `Double` values.
     private let _cachedNumbers: [Double]?
 
     /// Non-missing numeric values in row order. Materialized lazily when not pre-cached.
@@ -34,8 +37,11 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         return compact
     }
 
+    /// Raw `Double` storage array including `0.0` placeholders at missing positions.
     var values: [Double] { Array(floatColumn.values) }
+    /// Packed null bitmap where `true` marks a missing row.
     var nullBitmap: BitSet { floatColumn.nullBitmap }
+    /// Boolean array view of ``nullBitmap`` where `true` marks a missing row.
     var isMissing: [Bool] {
         let n = floatColumn.count
         let bm = floatColumn.nullBitmap
@@ -45,8 +51,10 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         return (0..<n).map { bm[$0] }
     }
 
+    /// Total number of rows in the buffer.
     var count: Int { floatColumn.count }
 
+    /// Whether every non-missing value can be represented exactly as an IEEE-754 `Float32`.
     var isExactFloat32: Bool {
         if !hasMissing {
             return MLXBackend.isExactFloat32(floatColumn.values)
@@ -54,6 +62,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         return MLXBackend.isExactFloat32(numbers)
     }
 
+    /// Wraps an existing ``Float64Column`` in a ``NumericBuffer``.
     init(floatColumn: Float64Column) {
         self.floatColumn = floatColumn
         let nullCount = floatColumn.nullBitmap.setBitCount
@@ -62,6 +71,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         self._cachedNumbers = nil
     }
 
+    /// Converts an ``Int64Column`` into a ``Double``-backed ``NumericBuffer``.
     init(intColumn: Int64Column) {
         let count = intColumn.count
         let bm = intColumn.nullBitmap
@@ -82,6 +92,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         self._cachedNumbers = nil
     }
 
+    /// Creates a ``NumericBuffer`` from parallel `Double` values and missing flags.
     init(values: [Double], isMissing: [Bool]) {
         var bm = BitSet(count: values.count)
         var compact: [Double] = []
@@ -99,6 +110,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         self._cachedNumbers = compact
     }
 
+    /// Creates a non-null ``NumericBuffer`` from an array of `Double` values.
     init(numbers: [Double], name: String = "") {
         self.floatColumn = Float64Column(name: name, numbers: numbers)
         self.nonMissingCount = numbers.count
@@ -106,6 +118,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         self._cachedNumbers = numbers
     }
 
+    /// Creates a ``NumericBuffer`` from ``DataValue`` elements, returning `nil` if any element is neither `.number` nor `.missing`.
     init?(dataValues: [DataValue], name: String = "") {
         var vals = ContiguousArray<Double>()
         vals.reserveCapacity(dataValues.count)
@@ -130,16 +143,19 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         self._cachedNumbers = nil
     }
 
+    /// Returns `true` when two numeric buffers have identical values and null bitmaps.
     static func == (lhs: NumericBuffer, rhs: NumericBuffer) -> Bool {
         lhs.floatColumn.values == rhs.floatColumn.values
             && lhs.floatColumn.nullBitmap == rhs.floatColumn.nullBitmap
     }
 
+    /// Hashes the buffer's values and null bitmap into `hasher`.
     func hash(into hasher: inout Hasher) {
         hasher.combine(floatColumn.values)
         hasher.combine(floatColumn.nullBitmap)
     }
 
+    /// Converts parallel `Double` values and missing flags into an array of ``DataValue`` elements.
     static func toDataValues(numbers: [Double], isMissing: [Bool]) -> [DataValue] {
         var result: [DataValue] = []
         result.reserveCapacity(numbers.count)
@@ -154,6 +170,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         return result
     }
 
+    /// Constructs a ``Float64Column`` from `numbers` and `isMissing`, marking non-finite numbers as missing.
     static func makeColumn(name: String, numbers: [Double], isMissing: [Bool]) -> Float64Column {
         var vals = ContiguousArray<Double>()
         vals.reserveCapacity(numbers.count)
@@ -169,6 +186,7 @@ struct NumericBuffer: Equatable, Hashable, Sendable {
         return Float64Column(name: name, values: vals, nullBitmap: bm)
     }
 
+    /// Constructs a ``Float64Column`` from `values` and `nullBitmap`, sanitizing any non-finite values into null entries.
     static func makeColumn(name: String, values: ContiguousArray<Double>, nullBitmap: BitSet) -> Float64Column {
         let count = values.count
         if !nullBitmap.mayHaveTrueBits {
@@ -246,6 +264,7 @@ public struct ColumnStatistics: Equatable, Hashable, Sendable, Codable, CustomSt
         }
     }
 
+    /// Formats a fractional probability in `0...1` as a percentage label (such as `"25%"` or `"12.5%"`).
     static func percentileLabel(for probability: Double) -> String {
         let percentage = Swift.min(Swift.max(probability, 0), 1) * 100
         if percentage.rounded() == percentage {
@@ -277,6 +296,9 @@ public struct DataFrameStatistics: Equatable, Hashable, Sendable, Codable, Custo
     public let columnCount: Int
 
     /// Returns the statistics for a column, or `nil` if it has none.
+    ///
+    /// - Parameter column: Name of the numeric column.
+    /// - Returns: The column's ``ColumnStatistics``, or `nil` if unavailable.
     public subscript(_ column: String) -> ColumnStatistics? {
         columns[column]
     }
@@ -290,6 +312,9 @@ public struct DataFrameSummary: Equatable, Hashable, Sendable, Codable, CustomSt
     public let summaries: [String: ColumnSummary]
 
     /// Returns the summary for a column, or `nil` if it has none.
+    ///
+    /// - Parameter column: Name of the numeric column.
+    /// - Returns: The column's ``ColumnSummary``, or `nil` if unavailable.
     public subscript(_ column: String) -> ColumnSummary? {
         summaries[column]
     }
@@ -325,6 +350,8 @@ public struct DataFrameSummary: Equatable, Hashable, Sendable, Codable, CustomSt
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -340,6 +367,9 @@ public struct MissingCounts: Equatable, Hashable, Sendable, Codable, CustomStrin
     public let rowCount: Int
 
     /// Returns the missing-value count for a column, or `nil` if the column is unknown.
+    ///
+    /// - Parameter column: Name of the column.
+    /// - Returns: Number of missing values in `column`, or `nil` if not found.
     public subscript(_ column: String) -> Int? {
         counts[column]
     }
@@ -350,6 +380,8 @@ public struct MissingCounts: Equatable, Hashable, Sendable, Codable, CustomStrin
     }
 
     /// Renders one line per column followed by a total-missing footer.
+    ///
+    /// - Returns: Formatted missing-value report string.
     public func describe() -> String {
         let width = columnOrder.map(\.count).max() ?? 0
         var lines = columnOrder.map { name in
@@ -366,6 +398,8 @@ public struct MissingCounts: Equatable, Hashable, Sendable, Codable, CustomStrin
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -379,11 +413,16 @@ public struct ColumnTypes: Equatable, Hashable, Sendable, Codable, CustomStringC
     public let types: [String: DataType]
 
     /// Returns the type of a column, or `nil` if the column is unknown.
+    ///
+    /// - Parameter column: Name of the column.
+    /// - Returns: The inferred ``DataType``, or `nil` if not found.
     public subscript(_ column: String) -> DataType? {
         types[column]
     }
 
     /// Renders one line per column followed by a column-count footer.
+    ///
+    /// - Returns: Formatted column-type report string.
     public func describe() -> String {
         let width = columnOrder.map(\.count).max() ?? 0
         var lines = columnOrder.map { name in
@@ -400,6 +439,8 @@ public struct ColumnTypes: Equatable, Hashable, Sendable, Codable, CustomStringC
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -415,11 +456,16 @@ public struct UniqueCounts: Equatable, Hashable, Sendable, Codable, CustomString
     public let rowCount: Int
 
     /// Returns the distinct-value count for a column, or `nil` if the column is unknown.
+    ///
+    /// - Parameter column: Name of the column.
+    /// - Returns: Number of distinct non-missing values in `column`, or `nil` if not found.
     public subscript(_ column: String) -> Int? {
         counts[column]
     }
 
     /// Renders one line per column followed by a column and row count footer.
+    ///
+    /// - Returns: Formatted unique-value count report string.
     public func describe() -> String {
         let width = columnOrder.map(\.count).max() ?? 0
         var lines = columnOrder.map { name in
@@ -436,6 +482,8 @@ public struct UniqueCounts: Equatable, Hashable, Sendable, Codable, CustomString
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -494,6 +542,8 @@ extension DataFrame {
     ///
     /// Columns containing non-numeric values are excluded. Missing values are
     /// ignored in every reduction.
+    ///
+    /// - Returns: A ``DataFrameStatistics`` value containing per-column numeric statistics.
     public func statistics() -> DataFrameStatistics {
         var result: [String: ColumnStatistics] = [:]
         for column in columns {
@@ -514,6 +564,11 @@ extension DataFrame {
     ///
     /// Use `describe()` on the returned instance to render a pandas-style text
     /// table identical to `DataFrame.describe()`.
+    ///
+    /// - Parameters:
+    ///   - percentiles: Fractional probabilities in `0...1` to include for numeric columns. Defaults to `[0.25, 0.5, 0.75]`.
+    ///   - include: Optional set of ``DataType`` values to include; `nil` includes all columns.
+    /// - Returns: A ``DataFrameDescription`` containing structured numeric and non-numeric summaries.
     public func describeStructured(
         percentiles: [Double] = [0.25, 0.5, 0.75],
         include: Set<DataType>? = nil
@@ -568,6 +623,8 @@ extension DataFrame {
     }
 
     /// Returns a structured, ordered summary table for all numeric columns.
+    ///
+    /// - Returns: A ``DataFrameSummary`` preserving column order.
     public func summaryTable() -> DataFrameSummary {
         let map = summary()
         let order = columnNames.filter { map[$0] != nil }
@@ -575,6 +632,8 @@ extension DataFrame {
     }
 
     /// Returns a structured, ordered missing-count summary for all columns.
+    ///
+    /// - Returns: A ``MissingCounts`` instance preserving column order.
     public func missingSummary() -> MissingCounts {
         MissingCounts(
             columnOrder: columnNames,
@@ -584,6 +643,8 @@ extension DataFrame {
     }
 
     /// Returns a structured, ordered distinct-value count summary for all columns.
+    ///
+    /// - Returns: A ``UniqueCounts`` instance preserving column order.
     public func uniqueSummary() -> UniqueCounts {
         UniqueCounts(
             columnOrder: columnNames,
@@ -596,6 +657,8 @@ extension DataFrame {
     public var dtypes: ColumnTypes { columnTypes() }
 
     /// Returns an ordered struct of inferred column types.
+    ///
+    /// - Returns: A ``ColumnTypes`` instance preserving column order.
     public func columnTypes() -> ColumnTypes {
         var map: [String: DataType] = [:]
         for name in columnNames {
@@ -617,10 +680,12 @@ extension DataFrame {
     }
 }
 
+/// Formats an optional `Double` with `%.6g` precision, or `"NaN"` when `nil`.
 private func format(_ value: Double?) -> String {
     value.map { String(format: "%.6g", $0) } ?? "NaN"
 }
 
+/// Renders a list of `(header, values)` columns as an aligned plain-text table.
 func renderAlignedTable(columns: [(header: String, values: [String])]) -> String {
     let rowCount = columns.first?.values.count ?? 0
     let widths = columns.map { column in
@@ -638,6 +703,7 @@ func renderAlignedTable(columns: [(header: String, values: [String])]) -> String
     return lines.joined(separator: "\n")
 }
 
+/// Pads and joins one row of cells using `widths`.
 private func renderAlignedRow(_ cells: [String], widths: [Int]) -> String {
     cells.enumerated().map { index, value in
         value.padding(toLength: widths[index], withPad: " ", startingAt: 0)
@@ -656,6 +722,8 @@ extension ColumnStatistics {
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -671,6 +739,8 @@ extension NonNumericSummary {
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -690,6 +760,8 @@ extension DataFrameStatistics {
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -702,6 +774,8 @@ extension DataFrameDescription {
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }

@@ -1,5 +1,8 @@
 # Bandal
 
+[![Swiftversions](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FNeuroAssociates%2FBandal%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/NeuroAssociates/Bandal)
+[![Platforms](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FNeuroAssociates%2FBandal%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/NeuroAssociates/Bandal)
+
 [English](README.md) · [API 레퍼런스](Documentation/API.ko.md) · [API Reference](Documentation/API.md) · [독학 가이드](Documentation/Guides/01-Core-Data-Structures.ko.md) · [Self-Study Guides](Documentation/Guides/01-Core-Data-Structures.md)
 
 **Bandal**은 Python의 [pandas](https://pandas.pydata.org/)에서 영감을 받아 [Swift API Design Guidelines](https://www.swift.org/documentation/api-design-guidelines/)에 따라 설계된 테이블형 데이터 분석용 Swift 패키지입니다.
@@ -17,14 +20,14 @@
 - **스트리밍 CSV 및 JSON 입출력**: 64 KB 청크 단위의 RFC 4180 스트리밍 CSV 리더/라이터와 JSON 행 배열 리더/라이터(`init(jsonData:)`, `init(contentsOfJSON:)`, `jsonData(prettyPrinted:)`, `writeJSON(to:)`)를 제공합니다.
 - **풍부한 쿼리 및 변환 기능**: 조합 가능한 `RowPredicate`와 문자열 표현식 기반 `query("temp >= 20 && active == true")`, 행 단위 계산 컬럼(`withColumn(name:computing:)`), UTC `DateComponent` 추출, 문자열 컬럼 연산(`lowercased`, `uppercased`, `trimmed`, `stringLength`, `replacingSubstring`, `containsSubstring`)을 지원합니다.
 - **그룹화, 조인, 재구조화 및 윈도우 함수**: 다중 키 `groupBy`(`aggregate`, `transform`), 단일/다중 키 조인(`.left`, `.inner`, `.right`, `.full` 및 `suffixes`), `melt`, `pivotTable`, `exploded`, `transposed`, 행 개수 및 시간 간격 기반 `rolling`, `expanding` 윈도우를 지원합니다.
-- **MLX-Swift 수치 엔진**: 기술 통계 모멘트, 축소 연산, 그룹 집계, 누적합 윈도우, 원소별 수치 연산(`combining`, `scaling`, `cumulative`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`), `MLX.matmul` 기반 공분산/상관계수 행렬, `ExecutionPolicy` 전환(`.automatic`, `.native`, `.cpu`, `.gpu`), `MLXVector` 텐서 상호운용을 제공합니다.
+- **MLX-Swift 수치 엔진**: 기술 통계 모멘트, 축소 연산, 그룹 집계, 누적합 윈도우, 원소별 수치 연산(`combining`, `scaling`, `cumulative`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`), `MLX.matmul` 기반 공분산/상관계수 행렬, `ExecutionPolicy` 전환(`.automatic`, `.cpu`, `.gpu`, `.gpuFloat32`), `MLXVector` 텐서 상호운용을 제공합니다.
 
 ---
 
 ## 요구 사항
 
-- macOS 14 이상 (MLX 가속을 위해 Apple Silicon 권장)
-- Swift 6.4 이상
+- 플랫폼: macOS 14+, iOS 17+, tvOS 17+, visionOS 1+ (MLX 가속을 위해 Apple Silicon 권장)
+- Swift 6.0 이상
 - MLX 가속 커널 실행 시 Metal 툴체인이 포함된 Xcode
 
 ---
@@ -124,7 +127,7 @@ print(desc)
 | `df.melt(...)` / `df.pivot_table(...)` | `try df.melt(...)` / `try df.pivotTable(...)` |
 | `df.explode("col")` / `df.T` | `try df.exploded("col")` / `try df.transposed()` |
 | `df.rolling(w).mean()` / `df.rolling("60s", on=...).mean()` / `df.expanding().sum()` | `try df.rolling("col", window: w, minPeriods: 1, using: .mean)` / `try df.rolling("col", on: "ts", interval: 60, using: .mean)` / `try df.expanding("col", using: .sum)` |
-| `df[(df["x"] >= 10) & (df["y"] == "a")]` / `s.where(cond, other)` | `df[(try df.series("x") >= 10.0) && try df.series("y").equals("a")]` / `try s.where(mask, otherwise: other)` |
+| `df[(df["x"] >= 10) & (df["y"] == "a")]` / `s.where(cond, other)` | `df[(try df.series("x") >= 10.0) && try df.series("y").equals("a")]` / `try s.where(mask, other: other)` |
 | `np.log1p(df["x"])` / `df["x"] ** 2` / `pd.cut` / `pd.qcut` / `s.interpolate()` / `s.ewm(alpha=...).mean()` | `try df.applying("x", function: .log1p)` / `try df.power("x", exponent: 2)` / `binned` / `quantileBinned` / `interpolated` / `exponentiallyWeighted` |
 | `df.pivot(...)` / `pd.crosstab(...)` / `pd.get_dummies(...)` / `pd.merge_asof(...)` / `df.resample(...)` | `try df.pivoted(...)` / `try df.crossTabulated(...)` / `try df.oneHotEncoded(...)` / `try df.joinAsOf(...)` / `try df.resample(...)` |
 | `df.to_markdown()` | `df.toMarkdown()` |
@@ -146,9 +149,8 @@ let corr = try BandalRuntime.withExecutionPolicy(.gpu) {
     try frame.correlation()
 }
 
-// 컬럼을 MLXVector / MLXArray로 직접 변환하거나 다시 DataFrame으로 복원
+// 컬럼을 MLXVector로 직접 변환하거나 다시 DataFrame으로 복원
 let vector = try frame.toMLXVector("revenue")
-let mlxArray = vector.makeMLXArray()
 let restored = try DataFrame(mlxColumns: [(name: "revenue", vector: vector)])
 ```
 

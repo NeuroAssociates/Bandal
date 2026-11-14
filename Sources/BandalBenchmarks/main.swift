@@ -2,8 +2,16 @@ import Bandal
 import Darwin
 import Foundation
 
+/// Number of timed repetitions executed for each benchmark operation.
 private let repetitions = 3
 
+/// Runs `operation` `repetitions` times, verifies checksum stability, and prints median duration and peak RSS.
+///
+/// - Parameters:
+///   - name: Benchmark operation label.
+///   - rows: Number of rows in the dataset.
+///   - operation: Closure performing the workload and returning a deterministic checksum.
+/// - Throws: ``BenchmarkError`` if the checksum is non-finite or varies across repetitions.
 private func benchmark(
     _ name: String,
     rows: Int,
@@ -38,11 +46,18 @@ private func benchmark(
     )
 }
 
+/// Errors thrown during benchmark verification.
 private enum BenchmarkError: Error {
+    /// The benchmark produced a `NaN` or infinite checksum.
     case nonFiniteChecksum(operation: String)
+    /// The benchmark produced inconsistent checksums across repetitions.
     case unstableChecksum(operation: String)
 }
 
+/// Computes a scalar checksum from a ``ColumnSummary``.
+///
+/// - Parameter summary: Summary to reduce.
+/// - Returns: Sum of mean, standard deviation, median, minimum, and maximum, or `.nan` if unavailable.
 private func summaryChecksum(_ summary: ColumnSummary?) -> Double {
     guard let summary,
           let mean = summary.mean,
@@ -56,18 +71,29 @@ private func summaryChecksum(_ summary: ColumnSummary?) -> Double {
     return mean + standardDeviation + median + minimum + maximum
 }
 
+/// Sums all `.number` elements in an array of ``DataValue``s.
+///
+/// - Parameter values: Values to accumulate.
+/// - Returns: Sum of numeric cells.
 private func numberTotal(_ values: [DataValue]) -> Double {
     values.reduce(0) { total, value in
         if case .number(let number) = value { total + number } else { total }
     }
 }
 
+/// Queries the current process peak resident set size (RSS) in megabytes.
+///
+/// - Returns: Peak RSS in megabytes, or `.nan` if `getrusage` fails.
 private func peakResidentMemoryMB() -> Double {
     var usage = rusage()
     guard getrusage(RUSAGE_SELF, &usage) == 0 else { return .nan }
     return Double(usage.ru_maxrss) / 1_048_576
 }
 
+/// Generates a synthetic ``DataFrame`` with `rowCount` rows for benchmarking.
+///
+/// - Parameter rowCount: Number of rows to generate.
+/// - Returns: A three-column ``DataFrame`` (`group`, `value`, `id`).
 private func makeFrame(rowCount: Int) throws -> DataFrame {
     try DataFrame(columns: [
         (
@@ -85,6 +111,10 @@ private func makeFrame(rowCount: Int) throws -> DataFrame {
     ])
 }
 
+/// Writes a temporary CSV file with `rowCount` rows for CSV I/O benchmarking.
+///
+/// - Parameter rowCount: Number of rows to write.
+/// - Returns: File URL of the temporary CSV file.
 private func makeCSV(rowCount: Int) throws -> URL {
     let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("bandal-benchmark-\(UUID().uuidString).csv")
@@ -96,6 +126,9 @@ private func makeCSV(rowCount: Int) throws -> URL {
     return url
 }
 
+/// Runs the full suite of benchmarks for `rowCount` rows.
+///
+/// - Parameter rowCount: Number of rows in the benchmark dataset.
 private func runBenchmarks(rowCount: Int) throws {
     let data = try makeFrame(rowCount: rowCount)
     let lookup = try DataFrame(columns: [

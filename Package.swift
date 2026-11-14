@@ -7,6 +7,9 @@ let package = Package(
     name: "Bandal",
     platforms: [
         .macOS(.v14),
+        .iOS(.v17),
+        .tvOS(.v17),
+        .visionOS(.v1),
     ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
@@ -28,18 +31,15 @@ let package = Package(
             ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
-            ],
+            ]
         ),
         .executableTarget(
             name: "BandalBenchmarks",
-            dependencies: ["Bandal"],
+            dependencies: ["Bandal"]
         ),
         .executableTarget(
             name: "BandalPandasBenchmark",
-            dependencies: ["Bandal"],
-            path: "Scripts",
-            exclude: ["benchmark.py", "benchmark_compare.py", "benchmark.sh", "test-with-mlx.sh"],
-            sources: ["benchmark.swift"],
+            dependencies: ["Bandal"]
         ),
         .testTarget(
             name: "BandalTests",
@@ -49,7 +49,7 @@ let package = Package(
             ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
-            ],
+            ]
         ),
     ]
 )

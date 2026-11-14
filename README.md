@@ -1,5 +1,8 @@
 # Bandal
 
+[![Swiftversions](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FNeuroAssociates%2FBandal%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/NeuroAssociates/Bandal)
+[![Platforms](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FNeuroAssociates%2FBandal%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/NeuroAssociates/Bandal)
+
 [한국어](README.ko.md) · [API Reference](Documentation/API.md) · [API 레퍼런스](Documentation/API.ko.md) · [Self-Study Guides](Documentation/Guides/01-Core-Data-Structures.md) · [독학 가이드](Documentation/Guides/01-Core-Data-Structures.ko.md)
 
 **Bandal** is a Swift package for tabular data analysis, modeled after Python's [pandas](https://pandas.pydata.org/) and designed according to the [Swift API Design Guidelines](https://www.swift.org/documentation/api-design-guidelines/).
@@ -17,14 +20,14 @@ For a demo project, see [Bandal-demo](https://github.com/NeuroAssociates/Bandal-
 - **Streaming CSV & JSON I/O**: RFC 4180 streaming CSV reader/writer in 64 KB chunks plus JSON row-object reader/writer (`init(jsonData:)`, `init(contentsOfJSON:)`, `jsonData(prettyPrinted:)`, `writeJSON(to:)`).
 - **Rich querying & transformations**: Composable `RowPredicate` and expression-based `query("temp >= 20 && active == true")`, row-computed columns (`withColumn(name:computing:)`), UTC `DateComponent` extraction, and vectorized string operations (`lowercased`, `uppercased`, `trimmed`, `stringLength`, `replacingSubstring`, `containsSubstring`).
 - **Grouping, joins, reshaping & windows**: Multi-key `groupBy` (`aggregate`, `transform`), single- and multi-key joins (`.left`, `.inner`, `.right`, `.full` with custom `suffixes`), `melt`, `pivotTable`, `exploded`, `transposed`, row-count and time-interval `rolling`, and `expanding` windows.
-- **MLX-Swift numeric engine**: Vectorized moments, reductions, grouped aggregations, prefix-sum windows, element-wise math (`combining`, `scaling`, `cumulative`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`), `MLX.matmul` covariance/correlation matrices, `ExecutionPolicy` scoping (`.automatic`, `.native`, `.cpu`, `.gpu`), and `MLXVector` tensor interop.
+- **MLX-Swift numeric engine**: Vectorized moments, reductions, grouped aggregations, prefix-sum windows, element-wise math (`combining`, `scaling`, `cumulative`, `abs`, `clipped`, `rounded`, `difference`, `percentChange`), `MLX.matmul` covariance/correlation matrices, `ExecutionPolicy` scoping (`.automatic`, `.cpu`, `.gpu`, `.gpuFloat32`), and `MLXVector` tensor interop.
 
 ---
 
 ## Requirements
 
-- macOS 14 or later (Apple silicon recommended for MLX acceleration)
-- Swift 6.4 or later
+- Platforms: macOS 14+, iOS 17+, tvOS 17+, visionOS 1+ (Apple silicon recommended for MLX acceleration)
+- Swift 6.0 or later
 - Xcode with the Metal toolchain installed when running MLX-accelerated kernels
 
 ---
@@ -124,7 +127,7 @@ print(desc)
 | `df.melt(...)` / `df.pivot_table(...)` | `try df.melt(...)` / `try df.pivotTable(...)` |
 | `df.explode("col")` / `df.T` | `try df.exploded("col")` / `try df.transposed()` |
 | `df.rolling(w).mean()` / `df.rolling("60s", on=...).mean()` / `df.expanding().sum()` | `try df.rolling("col", window: w, minPeriods: 1, using: .mean)` / `try df.rolling("col", on: "ts", interval: 60, using: .mean)` / `try df.expanding("col", using: .sum)` |
-| `df[(df["x"] >= 10) & (df["y"] == "a")]` / `s.where(cond, other)` | `df[(try df.series("x") >= 10.0) && try df.series("y").equals("a")]` / `try s.where(mask, otherwise: other)` |
+| `df[(df["x"] >= 10) & (df["y"] == "a")]` / `s.where(cond, other)` | `df[(try df.series("x") >= 10.0) && try df.series("y").equals("a")]` / `try s.where(mask, other: other)` |
 | `np.log1p(df["x"])` / `df["x"] ** 2` / `pd.cut` / `pd.qcut` / `s.interpolate()` / `s.ewm(alpha=...).mean()` | `try df.applying("x", function: .log1p)` / `try df.power("x", exponent: 2)` / `binned` / `quantileBinned` / `interpolated` / `exponentiallyWeighted` |
 | `df.pivot(...)` / `pd.crosstab(...)` / `pd.get_dummies(...)` / `pd.merge_asof(...)` / `df.resample(...)` | `try df.pivoted(...)` / `try df.crossTabulated(...)` / `try df.oneHotEncoded(...)` / `try df.joinAsOf(...)` / `try df.resample(...)` |
 | `df.to_markdown()` | `df.toMarkdown()` |
@@ -146,9 +149,8 @@ let corr = try BandalRuntime.withExecutionPolicy(.gpu) {
     try frame.correlation()
 }
 
-// Convert a column directly to an MLXVector / MLXArray and back
+// Convert a column directly to an MLXVector and back
 let vector = try frame.toMLXVector("revenue")
-let mlxArray = vector.makeMLXArray()
 let restored = try DataFrame(mlxColumns: [(name: "revenue", vector: vector)])
 ```
 

@@ -8,6 +8,12 @@ extension DataFrame {
     ///
     /// Pass `seed` for a reproducible selection. `count` is clamped to
     /// `0...rowCount`.
+    ///
+    /// - Parameters:
+    ///   - count: Number of distinct rows to sample.
+    ///   - seed: Optional 64-bit seed for deterministic sampling via SplitMix64.
+    /// - Returns: A sampled ``DataFrame`` preserving original relative row order.
+    /// - Throws: ``DataFrameError`` if row slicing fails.
     public func sample(_ count: Int, seed: UInt64? = nil) throws -> DataFrame {
         let size = min(max(count, 0), rowCount)
         var indices = Array(0..<rowCount)
@@ -21,6 +27,12 @@ extension DataFrame {
     }
 
     /// Returns a copy with `column` replaced by `transform` applied to each value.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the column to transform.
+    ///   - transform: Closure mapping each source ``DataValue`` to a replacement ``DataValue``.
+    /// - Returns: A new ``DataFrame`` with the transformed column.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `column` does not exist, or any error thrown by `transform`.
     public func mapped(
         _ column: String,
         _ transform: (DataValue) throws -> DataValue
@@ -30,11 +42,15 @@ extension DataFrame {
     }
 }
 
+/// Deterministic 64-bit pseudo-random number generator implementing SplitMix64.
 private struct SplitMix64: RandomNumberGenerator {
+    /// Current 64-bit internal state.
     var state: UInt64
 
+    /// Creates a SplitMix64 generator seeded with `seed`.
     init(seed: UInt64) { state = seed }
 
+    /// Advances the internal state and returns the next 64-bit pseudo-random integer.
     mutating func next() -> UInt64 {
         state &+= 0x9E37_79B9_7F4A_7C15
         var z = state

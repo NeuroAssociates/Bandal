@@ -8,6 +8,7 @@ import Foundation
 /// `df[mask: mask]` or `df.filtered(by: mask)` for zero-allocation row
 /// filtering.
 public struct BooleanMask: Equatable, Hashable, Sendable, Codable, CustomStringConvertible, CustomDebugStringConvertible, TextOutputStreamable {
+    /// The underlying contiguous 64-bit word bit set.
     @usableFromInline
     let bitSet: BitSet
 
@@ -70,12 +71,18 @@ public struct BooleanMask: Equatable, Hashable, Sendable, Codable, CustomStringC
     }
 
     /// Logical conjunction (`AND`) of two masks.
+    ///
+    /// - Parameter other: The mask to combine with.
+    /// - Returns: A mask whose bits are `true` where both masks are `true`.
     @inlinable
     public func and(_ other: BooleanMask) -> BooleanMask {
         BooleanMask(bitSet: bitSet.bitwiseAnd(other.bitSet))
     }
 
     /// Logical disjunction (`OR`) of two masks.
+    ///
+    /// - Parameter other: The mask to combine with.
+    /// - Returns: A mask whose bits are `true` where either mask is `true`.
     @inlinable
     public func or(_ other: BooleanMask) -> BooleanMask {
         BooleanMask(bitSet: bitSet.bitwiseOr(other.bitSet))
@@ -88,23 +95,37 @@ public struct BooleanMask: Equatable, Hashable, Sendable, Codable, CustomStringC
     }
 
     /// Returns the element-wise logical `AND` of two masks.
+    ///
+    /// - Parameters:
+    ///   - lhs: The left-hand mask.
+    ///   - rhs: The right-hand mask.
+    /// - Returns: A mask that is `true` where both `lhs` and `rhs` are `true`.
     @inlinable
     public static func && (lhs: BooleanMask, rhs: BooleanMask) -> BooleanMask {
         lhs.and(rhs)
     }
 
     /// Returns the element-wise logical `OR` of two masks.
+    ///
+    /// - Parameters:
+    ///   - lhs: The left-hand mask.
+    ///   - rhs: The right-hand mask.
+    /// - Returns: A mask that is `true` where either `lhs` or `rhs` is `true`.
     @inlinable
     public static func || (lhs: BooleanMask, rhs: BooleanMask) -> BooleanMask {
         lhs.or(rhs)
     }
 
     /// Returns the element-wise logical negation of a mask.
+    ///
+    /// - Parameter mask: The mask to invert.
+    /// - Returns: A mask with every bit flipped.
     @inlinable
     public static prefix func ! (mask: BooleanMask) -> BooleanMask {
         mask.negated
     }
 
+    /// Coding keys used for `Codable` serialization of ``BooleanMask``.
     enum CodingKeys: String, CodingKey {
         case values
     }
@@ -149,9 +170,11 @@ public struct BooleanMask: Equatable, Hashable, Sendable, Codable, CustomStringC
 
 /// A high-performance contiguous bitset for null tracking and boolean filtering masks.
 public struct BitSet: Equatable, Hashable, Sendable {
+    /// Packed 64-bit words storing 64 bits per element.
     @usableFromInline
     var words: ContiguousArray<UInt64>
 
+    /// Total number of logical bits in the set.
     @usableFromInline
     var _count: Int
 
@@ -188,6 +211,11 @@ public struct BitSet: Equatable, Hashable, Sendable {
     }
 
     /// Creates a bit set directly from precomputed 64-bit words.
+    ///
+    /// - Parameters:
+    ///   - words: Packed 64-bit words.
+    ///   - count: Total number of valid bits.
+    ///   - mayHaveTrueBits: Whether any bit in `words` may be non-zero.
     @inlinable
     init(words: ContiguousArray<UInt64>, count: Int, mayHaveTrueBits: Bool = true) {
         self.words = words
@@ -203,6 +231,12 @@ public struct BitSet: Equatable, Hashable, Sendable {
         self.mayHaveTrueBits = false
     }
 
+    /// Returns a Boolean value indicating whether two bit sets have equal length and identical bit values.
+    ///
+    /// - Parameters:
+    ///   - lhs: A bit set to compare.
+    ///   - rhs: Another bit set to compare.
+    /// - Returns: `true` if both bit sets have the same `count` and identical bits; otherwise `false`.
     @inlinable
     public static func == (lhs: BitSet, rhs: BitSet) -> Bool {
         guard lhs._count == rhs._count else { return false }
@@ -210,6 +244,9 @@ public struct BitSet: Equatable, Hashable, Sendable {
         return lhs.words == rhs.words
     }
 
+    /// Hashes the essential components of the bit set by feeding them into the given hasher.
+    ///
+    /// - Parameter hasher: The hasher to use when combining the components of this instance.
     @inlinable
     public func hash(into hasher: inout Hasher) {
         hasher.combine(_count)
@@ -386,6 +423,7 @@ public struct BitSet: Equatable, Hashable, Sendable {
 
     /// Returns a copy of the set with every bit flipped.
     ///
+    /// - Returns: A new ``BitSet`` of length ``count`` with all bits inverted.
     /// - Complexity: O(*n* / 64), where *n* is `count`.
     @inlinable
     public func inverted() -> BitSet {
@@ -405,6 +443,7 @@ public struct BitSet: Equatable, Hashable, Sendable {
 
     /// Returns the positions of all set bits in ascending order.
     ///
+    /// - Returns: An array of zero-based indices where the bit is `true`.
     /// - Complexity: O(*n* / 64 + *k*), where *k* is `setBitCount`.
     @inlinable
     public func trueIndices() -> [Int] {

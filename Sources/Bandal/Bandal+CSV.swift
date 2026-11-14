@@ -1,14 +1,29 @@
 import Foundation
 
+/// Incremental builder that accumulates CSV fields into either a contiguous ``Float64Column`` or a boxed `[DataValue]` array.
 private struct CSVColumnBuilder {
+    /// Column name.
     let name: String
+    /// Explicitly requested column type from ``CSVReadOptions/columnTypes``, or `nil` for automatic inference.
     let explicitType: DataType?
+    /// Whether numeric-looking strings should be parsed as numbers.
     let infersNumbers: Bool
+    /// Whether the builder is currently accumulating into the unboxed `numbers` fast path.
     private(set) var isNumeric: Bool
+    /// Unboxed numeric storage used while all values are numbers or missing.
     private var numbers: ContiguousArray<Double> = []
+    /// Indices of missing values within `numbers`.
     private var nullIndices: [Int] = []
+    /// Fallback boxed storage used when non-numeric values are encountered.
     private var boxed: [DataValue] = []
 
+    /// Creates a CSV column builder.
+    ///
+    /// - Parameters:
+    ///   - name: Column name.
+    ///   - explicitType: Optional explicit target ``DataType``.
+    ///   - infersNumbers: Whether numbers are inferred automatically.
+    ///   - estimatedRows: Estimated row count for capacity reservation.
     init(name: String, explicitType: DataType?, infersNumbers: Bool, estimatedRows: Int) {
         self.name = name
         self.explicitType = explicitType
@@ -22,6 +37,9 @@ private struct CSVColumnBuilder {
         }
     }
 
+    /// Appends a parsed `Double` value.
+    ///
+    /// - Parameter number: Finite floating-point value.
     mutating func appendNumber(_ number: Double) {
         if isNumeric {
             numbers.append(number)
@@ -30,6 +48,7 @@ private struct CSVColumnBuilder {
         }
     }
 
+    /// Appends a missing (`null`) value.
     mutating func appendMissing() {
         if isNumeric {
             nullIndices.append(numbers.count)
@@ -39,6 +58,9 @@ private struct CSVColumnBuilder {
         }
     }
 
+    /// Appends an arbitrary ``DataValue``, demoting to boxed storage if necessary.
+    ///
+    /// - Parameter value: Parsed cell value.
     mutating func appendValue(_ value: DataValue) {
         if isNumeric {
             switch value {
@@ -56,6 +78,7 @@ private struct CSVColumnBuilder {
         boxed.append(value)
     }
 
+    /// Converts previously accumulated numeric values into boxed `[DataValue]` storage when a non-numeric value arrives.
     private mutating func demoteToBoxed() {
         guard isNumeric else { return }
         isNumeric = false
@@ -74,6 +97,9 @@ private struct CSVColumnBuilder {
         boxed = converted
     }
 
+    /// Finalizes the builder and produces a typed `DataColumn`.
+    ///
+    /// - Returns: A `DataColumn` backed by ``Float64Column`` or the inferred column type.
     func finish() -> DataColumn {
         if isNumeric {
             let n = numbers.count
@@ -99,6 +125,12 @@ private struct CSVColumnBuilder {
 
 extension DataFrame {
     /// Loads a CSV file, using the first record as its column names.
+    ///
+    /// - Parameters:
+    ///   - url: File URL of the UTF-8 CSV file.
+    ///   - delimiter: Single ASCII character used as the field separator. Defaults to `","`.
+    ///   - maximumRows: Optional maximum number of data rows to read.
+    /// - Throws: ``DataFrameError`` if the file cannot be read or the CSV structure is invalid.
     public init(
         contentsOfCSV url: URL,
         delimiter: Character = ",",
@@ -114,11 +146,22 @@ extension DataFrame {
     ///
     /// Records are read incrementally, so `maximumRows` stops file processing
     /// after the requested number of data records.
+    ///
+    /// - Parameters:
+    ///   - url: File URL of the UTF-8 CSV file.
+    ///   - options: Parsing and schema options.
+    /// - Throws: ``DataFrameError`` if the file cannot be read or parsing fails.
     public init(contentsOfCSV url: URL, options: CSVReadOptions) throws {
         try self.init(dataColumns: Self.readCSVColumns(url, options: options))
     }
 
     /// Writes the frame as UTF-8 CSV. Missing values are written as empty fields.
+    ///
+    /// - Parameters:
+    ///   - url: Destination file URL.
+    ///   - delimiter: Single ASCII character used as the field separator. Defaults to `","`.
+    ///   - includeHeader: Whether to write the column names as the first row. Defaults to `true`.
+    /// - Throws: ``DataFrameError/invalidCSV(_:)`` if the delimiter is invalid or writing fails.
     public func writeCSV(
         to url: URL,
         delimiter: Character = ",",
@@ -191,6 +234,11 @@ extension DataFrame {
     ///
     /// JSON `null` values become `.missing`. When `dateFormat` is supplied,
     /// string values matching the format are parsed as `.date`.
+    ///
+    /// - Parameters:
+    ///   - data: UTF-8 encoded JSON payload.
+    ///   - dateFormat: Optional `DateFormatter` format string for parsing `.date` values.
+    /// - Throws: ``DataFrameError`` if the JSON is malformed, empty, or contains non-finite numbers.
     public init(jsonData data: Data, dateFormat: String? = nil) throws {
         let topLevel: Any
         do {
@@ -239,6 +287,11 @@ extension DataFrame {
     }
 
     /// Loads a `DataFrame` from a JSON file on disk.
+    ///
+    /// - Parameters:
+    ///   - url: File URL of the JSON file.
+    ///   - dateFormat: Optional `DateFormatter` format string for parsing `.date` values.
+    /// - Throws: ``DataFrameError`` if reading or decoding fails.
     public init(contentsOfJSON url: URL, dateFormat: String? = nil) throws {
         let data: Data
         do {
@@ -253,6 +306,10 @@ extension DataFrame {
     ///
     /// `.missing` values are encoded as JSON `null`, and `.date` values are
     /// encoded as ISO-8601 strings.
+    ///
+    /// - Parameter prettyPrinted: Whether to format the JSON output with indentation and newlines.
+    /// - Returns: UTF-8 encoded JSON `Data`.
+    /// - Throws: ``DataFrameError/invalidCSV(_:)`` if serialization fails.
     public func jsonData(prettyPrinted: Bool = false) throws -> Data {
         let records: [[String: Any]] = (0..<rowCount).map { row in
             var object: [String: Any] = [:]
@@ -285,6 +342,11 @@ extension DataFrame {
     }
 
     /// Writes the frame as records-oriented UTF-8 JSON to `url`.
+    ///
+    /// - Parameters:
+    ///   - url: Destination file URL.
+    ///   - prettyPrinted: Whether to format the JSON output with indentation. Defaults to `true`.
+    /// - Throws: ``DataFrameError/invalidCSV(_:)`` if encoding or writing fails.
     public func writeJSON(to url: URL, prettyPrinted: Bool = true) throws {
         let data = try jsonData(prettyPrinted: prettyPrinted)
         do {
@@ -294,6 +356,14 @@ extension DataFrame {
         }
     }
 
+    /// Converts a decoded `JSONSerialization` value into a ``DataValue``.
+    ///
+    /// - Parameters:
+    ///   - raw: Raw value from `JSONSerialization`.
+    ///   - column: Column name for error reporting.
+    ///   - row: Zero-based row index for error reporting.
+    ///   - dateFormat: Optional date format string.
+    /// - Returns: The converted ``DataValue``.
     private static func dataValueFromJSON(
         _ raw: Any?,
         column: String,
@@ -322,6 +392,12 @@ extension DataFrame {
         return .string(String(describing: raw))
     }
 
+    /// Incrementally streams and parses a CSV file into an array of `DataColumn` instances.
+    ///
+    /// - Parameters:
+    ///   - url: Source CSV file URL.
+    ///   - options: CSV reading configuration.
+    /// - Returns: Parsed columns in schema order.
     private static func readCSVColumns(
         _ url: URL,
         options: CSVReadOptions
@@ -549,6 +625,15 @@ extension DataFrame {
         return builders.map { $0.finish() }
     }
 
+    /// Infers or parses a single CSV field into a ``DataValue`` according to the column's schema options.
+    ///
+    /// - Parameters:
+    ///   - rawValue: Raw field substring.
+    ///   - missingTokens: Tokens treated as `.missing`.
+    ///   - infersNumbers: Whether numeric-looking strings should be parsed as numbers.
+    ///   - columnType: Optional explicit ``DataType``.
+    ///   - dateFormat: Optional `DateFormatter` format pattern for `.date` columns.
+    /// - Returns: The parsed ``DataValue``.
     private static func inferValue(
         _ rawValue: Substring,
         missingTokens: Set<String>,
@@ -624,6 +709,10 @@ extension DataFrame {
         return .string(strVal)
     }
 
+    /// Validates that `delimiter` is a single ASCII byte and returns its `UInt8` code.
+    ///
+    /// - Parameter delimiter: Delimiter character.
+    /// - Returns: Single ASCII byte representing `delimiter`.
     private static func csvDelimiterByte(_ delimiter: Character) throws -> UInt8 {
         let bytes = Array(String(delimiter).utf8)
         guard bytes.count == 1, let byte = bytes.first else {
@@ -632,6 +721,12 @@ extension DataFrame {
         return byte
     }
 
+    /// Parses a quoted RFC 4180 CSV record line into fields.
+    ///
+    /// - Parameters:
+    ///   - contents: Raw CSV record text.
+    ///   - delimiterByte: ASCII delimiter byte.
+    /// - Returns: Array of parsed records, each containing field strings.
     private static func parseCSVRecord(
         _ contents: String,
         delimiterByte: UInt8

@@ -35,6 +35,21 @@ public struct SeriesDescription: Equatable, Hashable, Sendable, Codable, CustomS
     /// Creates a series description from precomputed statistics.
     ///
     /// Statistics that do not apply to the series' data type default to `nil`.
+    ///
+    /// - Parameters:
+    ///   - name: Name of the described series.
+    ///   - dtype: Inferred ``DataType`` of the series.
+    ///   - count: Number of non-missing values.
+    ///   - mean: Arithmetic mean for numeric series.
+    ///   - standardDeviation: Sample standard deviation for numeric series.
+    ///   - min: Minimum value for numeric series.
+    ///   - q1: First quartile (25th percentile) for numeric series.
+    ///   - median: Median (50th percentile) for numeric series.
+    ///   - q3: Third quartile (75th percentile) for numeric series.
+    ///   - max: Maximum value for numeric series.
+    ///   - unique: Distinct non-missing count for non-numeric series.
+    ///   - top: Most frequent value for non-numeric series.
+    ///   - frequency: Occurrence count of `top` for non-numeric series.
     public init(
         name: String,
         dtype: DataType,
@@ -107,6 +122,8 @@ public struct SeriesDescription: Equatable, Hashable, Sendable, Codable, CustomS
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -170,6 +187,8 @@ public struct QuantileTable: Equatable, Hashable, Sendable, Codable, CustomStrin
     }
 
     /// Renders the table as pandas-style text with probabilities as row labels.
+    ///
+    /// - Returns: A formatted plain-text quantile table.
     public func describe() -> String {
         let rowLabels = probabilities.map { String(format: "%.4g", $0) }
         let formattedRows = values.map { row in
@@ -190,6 +209,8 @@ public struct QuantileTable: Equatable, Hashable, Sendable, Codable, CustomStrin
     public var debugDescription: String { description }
 
     /// Writes ``description`` to the given output stream.
+    ///
+    /// - Parameter target: Destination text output stream.
     public func write<Target: TextOutputStream>(to target: inout Target) {
         target.write(description)
     }
@@ -214,6 +235,8 @@ public enum AsOfDirection: String, Hashable, Sendable, Codable, CaseIterable, Cu
 
 extension Series {
     /// Returns a structured ``SeriesDescription`` summarizing this series.
+    ///
+    /// - Returns: A ``SeriesDescription`` instance containing numeric or non-numeric summary metrics.
     public func describeStructured() -> SeriesDescription {
         if let stats = statistics() {
             return SeriesDescription(
@@ -268,21 +291,33 @@ extension Series {
     }
 
     /// Element-wise equality comparison against a numeric scalar.
+    ///
+    /// - Parameter scalar: Target `Double` value.
+    /// - Returns: A ``BooleanMask`` marking matching rows.
     public func equals(_ scalar: Double) -> BooleanMask {
         compareScalar(scalar) { $0 == $1 }
     }
 
     /// Element-wise equality comparison against a `String`.
+    ///
+    /// - Parameter string: Target `String` value.
+    /// - Returns: A ``BooleanMask`` marking matching rows.
     public func equals(_ string: String) -> BooleanMask {
         equals(.string(string))
     }
 
     /// Element-wise equality comparison against a `Bool`.
+    ///
+    /// - Parameter boolean: Target `Bool` value.
+    /// - Returns: A ``BooleanMask`` marking matching rows.
     public func equals(_ boolean: Bool) -> BooleanMask {
         equals(.boolean(boolean))
     }
 
     /// Element-wise equality comparison against a `DataValue`.
+    ///
+    /// - Parameter target: Target ``DataValue``.
+    /// - Returns: A ``BooleanMask`` marking matching rows.
     public func equals(_ target: DataValue) -> BooleanMask {
         var bm = BitSet(count: count)
         if target == .missing {
@@ -298,10 +333,14 @@ extension Series {
     }
 
     /// Element-wise inequality comparison against a `DataValue`.
+    ///
+    /// - Parameter target: Target ``DataValue``.
+    /// - Returns: A ``BooleanMask`` marking rows not equal to `target`.
     public func notEquals(_ target: DataValue) -> BooleanMask {
         !equals(target)
     }
 
+    /// Evaluates `predicate(element, rhs)` across all numeric elements, packing the result into a 64-bit word ``BooleanMask``.
     private func compareScalar(_ rhs: Double, _ predicate: (Double, Double) -> Bool) -> BooleanMask {
         let n = count
         if n == 0 {
@@ -388,6 +427,10 @@ extension Series {
     /// Applies a unary mathematical function (`sqrt`, `exp`, `log`, `log10`, `log1p`, `sin`, `cos`, `tan`, `sign`) element-wise.
     ///
     /// Domain violations (such as `log(-1)` or `sqrt(-1)`) become `.missing` rather than `NaN`.
+    ///
+    /// - Parameter function: The ``UnaryMathFunction`` to evaluate.
+    /// - Returns: A new ``Series`` with transformed numeric values.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func applying(_ function: UnaryMathFunction) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -400,6 +443,10 @@ extension Series {
     }
 
     /// Raises every numeric element to `exponent`. Non-finite results become `.missing`.
+    ///
+    /// - Parameter exponent: Power exponent.
+    /// - Returns: A new ``Series`` containing `x ** exponent`.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func power(_ exponent: Double) throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -423,6 +470,9 @@ extension Series {
     }
 
     /// Standardizes numeric values to zero mean and unit sample standard deviation (`z = (x - mean) / std`).
+    ///
+    /// - Returns: A standardized ``Series`` (or all `.missing` when standard deviation is zero or undefined).
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func standardized() throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -441,6 +491,9 @@ extension Series {
     }
 
     /// Scales numeric values linearly into `0...1` (`(x - min) / (max - min)`).
+    ///
+    /// - Returns: A min-max scaled ``Series`` in `0...1` (or all `.missing` when `max == min`).
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func minMaxScaled() throws -> Series {
         guard numericBuffer != nil else {
             throw DataFrameError.nonNumericColumn(name)
@@ -460,6 +513,8 @@ extension Series {
     // MARK: Index of Min / Max (idxmax / idxmin)
 
     /// Returns the row index of the first occurrence of the maximum numeric value, or `nil` if empty.
+    ///
+    /// - Returns: Zero-based row index of the maximum value, or `nil`.
     public func indexOfMax() -> Int? {
         guard let buffer = numericBuffer else { return nil }
         let vals = buffer.floatColumn.values
@@ -476,6 +531,8 @@ extension Series {
     }
 
     /// Returns the row index of the first occurrence of the minimum numeric value, or `nil` if empty.
+    ///
+    /// - Returns: Zero-based row index of the minimum value, or `nil`.
     public func indexOfMin() -> Int? {
         guard let buffer = numericBuffer else { return nil }
         let vals = buffer.floatColumn.values
@@ -494,6 +551,12 @@ extension Series {
     // MARK: Conditional Replacement (where / mask)
 
     /// Keeps elements where `mask` is `true` and replaces elements where `mask` is `false` with `replacement`.
+    ///
+    /// - Parameters:
+    ///   - mask: Boolean mask of length ``count``.
+    ///   - replacement: Value used when `mask[i]` is `false`. Defaults to `.missing`.
+    /// - Returns: A new ``Series`` with masked replacements applied.
+    /// - Throws: ``DataFrameError`` if `mask.count != count` or `replacement` is a non-finite number.
     public func `where`(_ mask: BooleanMask, otherwise replacement: DataValue = .missing) throws -> Series {
         guard mask.count == count else {
             throw DataFrameError.unequalColumnLengths(column: name, expected: count, actual: mask.count)
@@ -532,6 +595,9 @@ extension Series {
     /// Fills `.missing` interior gaps between numeric values via linear interpolation.
     ///
     /// Leading and trailing `.missing` values remain `.missing`.
+    ///
+    /// - Returns: A new ``Series`` with interior missing gaps linearly interpolated.
+    /// - Throws: ``DataFrameError/nonNumericColumn(_:)`` if the series is not numeric.
     public func interpolated() throws -> Series {
         guard let buffer = numericBuffer else {
             throw DataFrameError.nonNumericColumn(name)
@@ -575,6 +641,12 @@ extension Series {
     ///
     /// When `adjust == true` (the Pandas default), weights are normalized by decaying powers of `1 - alpha`;
     /// when `adjust == false`, the recursive formula `y_t = (1 - alpha) * y_{t-1} + alpha * x_t` is used.
+    ///
+    /// - Parameters:
+    ///   - alpha: Smoothing factor in `(0, 1]`.
+    ///   - adjust: Whether to divide by the decaying normalization factor in beginning periods. Defaults to `true`.
+    /// - Returns: A new ``Series`` containing the exponentially weighted moving average.
+    /// - Throws: ``DataFrameError`` if `alpha` is outside `(0, 1]` or the series is not numeric.
     public func exponentiallyWeightedMean(alpha: Double, adjust: Bool = true) throws -> Series {
         guard alpha > 0, alpha <= 1, alpha.isFinite else {
             throw DataFrameError.invalidWindowSize(0)
@@ -628,6 +700,14 @@ extension Series {
     /// Discretizes numeric values into intervals defined by strictly increasing `edges` (analogous to `pd.cut`).
     ///
     /// By default (`rightClosed == true`), bin `k` is `(edges[k], edges[k + 1]]` (with `edges[0]` included when `includeLowest == true`).
+    ///
+    /// - Parameters:
+    ///   - edges: Strictly increasing bin boundary values (at least 2).
+    ///   - labels: Optional custom bin labels of length `edges.count - 1`.
+    ///   - rightClosed: Whether intervals are closed on the right. Defaults to `true`.
+    ///   - includeLowest: Whether the first interval includes the minimum edge. Defaults to `true`.
+    /// - Returns: A `.string` ``Series`` containing bin labels (or `.missing` for out-of-range values).
+    /// - Throws: ``DataFrameError`` if `edges` is not strictly increasing, `labels` has the wrong count, or the series is non-numeric.
     public func binned(
         edges: [Double],
         labels: [String]? = nil,
@@ -695,6 +775,12 @@ extension Series {
     }
 
     /// Discretizes numeric values into `quantiles` equal-sized quantile buckets (analogous to `pd.qcut`).
+    ///
+    /// - Parameters:
+    ///   - quantiles: Number of quantile buckets (`>= 1`).
+    ///   - labels: Optional custom bucket labels.
+    /// - Returns: A `.string` ``Series`` containing quantile bucket labels.
+    /// - Throws: ``DataFrameError`` if `quantiles < 1`, `labels` count mismatches, or the series is non-numeric.
     public func quantileBinned(quantiles: Int, labels: [String]? = nil) throws -> Series {
         guard quantiles >= 1 else {
             throw DataFrameError.invalidWindowSize(quantiles)
@@ -738,6 +824,10 @@ extension DataFrame {
     // MARK: Vectorized BooleanMask Indexing
 
     /// Filters rows using a ``BooleanMask``.
+    ///
+    /// - Parameter mask: A ``BooleanMask`` whose length equals ``rowCount``.
+    /// - Returns: A new ``DataFrame`` containing only rows where `mask` is `true`.
+    /// - Throws: ``DataFrameError/unequalColumnLengths(column:expected:actual:)`` if `mask.count != rowCount`.
     public func filtered(by mask: BooleanMask) throws -> DataFrame {
         guard mask.count == rowCount else {
             throw DataFrameError.unequalColumnLengths(
@@ -750,11 +840,18 @@ extension DataFrame {
     }
 
     /// Subscript overload returning rows where `mask` is `true` (or an empty 0-row frame if `mask` mismatches).
+    ///
+    /// - Parameter mask: A ``BooleanMask`` to filter rows by.
+    /// - Returns: A filtered ``DataFrame``.
     public subscript(mask: BooleanMask) -> DataFrame {
         (try? filtered(by: mask)) ?? (try! head(0))
     }
 
     /// Evaluates multiple quantiles across all numeric columns in a single pass per column.
+    ///
+    /// - Parameter probabilities: Fractional probabilities in `0...1`.
+    /// - Returns: A ``QuantileTable`` containing quantiles for all numeric columns.
+    /// - Throws: ``DataFrameError/emptyColumns`` if the frame has no numeric columns.
     public func quantiles(_ probabilities: [Double]) throws -> QuantileTable {
         let numericCols = columns.filter { (try? dataType(of: $0.name)) == .number }
         guard !numericCols.isEmpty else { throw DataFrameError.emptyColumns }
@@ -777,6 +874,13 @@ extension DataFrame {
     // MARK: Unary Math, Power & Feature Scaling on DataFrame
 
     /// Applies a unary mathematical function (`sqrt`, `exp`, `log`, `log10`, `log1p`, `sin`, `cos`, `tan`, `sign`) to `column`.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to transform.
+    ///   - function: The ``UnaryMathFunction`` to apply.
+    ///   - outputColumn: Optional output column name; `nil` replaces `column` in place.
+    /// - Returns: A new ``DataFrame`` containing the transformed column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func applying(
         _ column: String,
         function: UnaryMathFunction,
@@ -788,6 +892,13 @@ extension DataFrame {
     }
 
     /// Raises `column` to `exponent` and stores the result in `outputColumn` (or replaces `column`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column.
+    ///   - exponent: Power exponent.
+    ///   - outputColumn: Optional output column name; `nil` replaces `column` in place.
+    /// - Returns: A new ``DataFrame`` containing the exponentiated column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func power(
         _ column: String,
         exponent: Double,
@@ -799,6 +910,12 @@ extension DataFrame {
     }
 
     /// Standardizes `column` to zero mean and unit standard deviation (`(x - mean) / std`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column.
+    ///   - outputColumn: Optional output column name; `nil` replaces `column` in place.
+    /// - Returns: A new ``DataFrame`` containing the standardized column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func standardized(
         _ column: String,
         as outputColumn: String? = nil
@@ -809,6 +926,12 @@ extension DataFrame {
     }
 
     /// Scales `column` linearly into `0...1` (`(x - min) / (max - min)`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column.
+    ///   - outputColumn: Optional output column name; `nil` replaces `column` in place.
+    /// - Returns: A new ``DataFrame`` containing the min-max scaled column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func minMaxScaled(
         _ column: String,
         as outputColumn: String? = nil
@@ -821,6 +944,16 @@ extension DataFrame {
     // MARK: Binning, Interpolation, Conditional Replacement & EWM on DataFrame
 
     /// Discretizes `column` into intervals defined by `edges` (analogous to `pd.cut`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to bin.
+    ///   - edges: Strictly increasing bin boundary values.
+    ///   - labels: Optional custom bin labels.
+    ///   - rightClosed: Whether intervals are closed on the right. Defaults to `true`.
+    ///   - includeLowest: Whether the first interval includes the minimum edge. Defaults to `true`.
+    ///   - outputColumn: Optional output column name; defaults to `"\(column)_bin"`.
+    /// - Returns: A new ``DataFrame`` with the binned column added or replaced.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric, or `edges` / `labels` are invalid.
     public func binned(
         _ column: String,
         edges: [Double],
@@ -840,6 +973,14 @@ extension DataFrame {
     }
 
     /// Discretizes `column` into `quantiles` equal-sized quantile buckets (analogous to `pd.qcut`).
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column to bin.
+    ///   - quantiles: Number of quantile buckets (`>= 1`).
+    ///   - labels: Optional custom bucket labels.
+    ///   - outputColumn: Optional output column name; defaults to `"\(column)_qbin"`.
+    /// - Returns: A new ``DataFrame`` with the quantile-binned column added or replaced.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric, or `quantiles` is invalid.
     public func quantileBinned(
         _ column: String,
         quantiles: Int,
@@ -852,6 +993,10 @@ extension DataFrame {
     }
 
     /// Linearly interpolates interior `.missing` values in `column` (or across all numeric columns when `column == nil`).
+    ///
+    /// - Parameter column: Optional numeric column name; `nil` interpolates every numeric column in the frame.
+    /// - Returns: A new ``DataFrame`` with interior missing gaps linearly interpolated.
+    /// - Throws: ``DataFrameError`` if `column` is specified but missing or non-numeric.
     public func interpolated(_ column: String? = nil) throws -> DataFrame {
         if let column {
             let updated = try series(column).interpolated()
@@ -866,6 +1011,14 @@ extension DataFrame {
     }
 
     /// Adds an exponentially weighted moving average column `column_ewm`.
+    ///
+    /// - Parameters:
+    ///   - column: Name of the numeric column.
+    ///   - alpha: Smoothing factor in `(0, 1]`.
+    ///   - adjust: Whether to divide by the decaying normalization factor. Defaults to `true`.
+    ///   - outputColumn: Optional output column name; defaults to `"\(column)_ewm"`.
+    /// - Returns: A new ``DataFrame`` containing the EWM column.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric, `alpha` is invalid, or the default output name conflicts.
     public func exponentiallyWeighted(
         _ column: String,
         alpha: Double,
@@ -881,6 +1034,10 @@ extension DataFrame {
     }
 
     /// Returns the row index of the first maximum numeric value in `column`.
+    ///
+    /// - Parameter column: Name of the numeric column.
+    /// - Returns: Zero-based row index of the maximum value, or `nil` if the column has no numeric values.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func indexOfMax(in column: String) throws -> Int? {
         let s = try series(column)
         guard s.numericBuffer != nil else {
@@ -890,6 +1047,10 @@ extension DataFrame {
     }
 
     /// Returns the row index of the first minimum numeric value in `column`.
+    ///
+    /// - Parameter column: Name of the numeric column.
+    /// - Returns: Zero-based row index of the minimum value, or `nil` if the column has no numeric values.
+    /// - Throws: ``DataFrameError`` if `column` is missing or non-numeric.
     public func indexOfMin(in column: String) throws -> Int? {
         let s = try series(column)
         guard s.numericBuffer != nil else {
@@ -902,7 +1063,12 @@ extension DataFrame {
 
     /// Reshapes unique `(index, columns)` pairs into a wide table without aggregation (analogous to `df.pivot`).
     ///
-    /// - Throws: ``DataFrameError/duplicateColumnName(_:)`` if duplicate `(index, columns)` pairs exist.
+    /// - Parameters:
+    ///   - index: Column name whose distinct values form the output rows.
+    ///   - columnKey: Column name whose distinct values form the output columns.
+    ///   - valueKey: Column name supplying cell values.
+    /// - Returns: A reshaped wide ``DataFrame``.
+    /// - Throws: ``DataFrameError/duplicateColumnName(_:)`` if duplicate `(index, columns)` pairs exist, or ``DataFrameError/columnNotFound(_:)`` if any column is missing.
     public func pivoted(
         index: String,
         columns columnKey: String,
@@ -959,6 +1125,13 @@ extension DataFrame {
     }
 
     /// Computes a contingency frequency table (or normalized proportions) of two columns (analogous to `pd.crosstab`).
+    ///
+    /// - Parameters:
+    ///   - index: Column name whose distinct values form the table rows.
+    ///   - columnKey: Column name whose distinct values form the table columns.
+    ///   - normalize: When `true`, divides all counts by the grand total so cells sum to `1.0`. Defaults to `false`.
+    /// - Returns: A contingency ``DataFrame``.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if either column does not exist.
     public func crossTabulated(
         index: String,
         columns columnKey: String,
@@ -1011,6 +1184,12 @@ extension DataFrame {
     }
 
     /// Expands categorical or string columns into binary `0.0` / `1.0` indicator columns (analogous to `pd.get_dummies`).
+    ///
+    /// - Parameters:
+    ///   - targetColumns: Names of the columns to expand into one-hot indicator columns.
+    ///   - dropFirst: When `true`, omits the first category of each column to avoid multicollinearity. Defaults to `false`.
+    /// - Returns: A new ``DataFrame`` with `targetColumns` replaced by binary indicator columns.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if any target column does not exist.
     public func oneHotEncoded(
         _ targetColumns: [String],
         dropFirst: Bool = false
@@ -1051,6 +1230,9 @@ extension DataFrame {
     }
 
     /// Applies `transform` to `self` for fluent functional method chaining (analogous to `df.pipe`).
+    ///
+    /// - Parameter transform: Closure receiving `self` and returning a transformed value `R`.
+    /// - Returns: The result returned by `transform(self)`.
     public func pipe<R>(_ transform: (DataFrame) throws -> R) rethrows -> R {
         try transform(self)
     }
@@ -1062,6 +1244,15 @@ extension DataFrame {
     /// For each row in `self`, finds the matching row in `other` according to `direction`
     /// (`.backward`, `.forward`, or `.nearest`), optionally Partitioned by exact matches on `by`
     /// and bounded by `tolerance` (in numeric units or seconds for `.date` keys).
+    ///
+    /// - Parameters:
+    ///   - other: Right-hand ``DataFrame`` to match against.
+    ///   - key: Name of the numeric or `.date` key column present in both frames.
+    ///   - groupColumn: Optional column name requiring an exact key match before performing the as-of search.
+    ///   - direction: Matching direction (`.backward`, `.forward`, or `.nearest`). Defaults to `.backward`.
+    ///   - tolerance: Optional maximum allowed distance between matched keys.
+    /// - Returns: A joined ``DataFrame`` preserving the row order of `self`.
+    /// - Throws: ``DataFrameError/columnNotFound(_:)`` if `key` or `groupColumn` is missing.
     public func joinAsOf(
         with other: DataFrame,
         on key: String,
@@ -1168,6 +1359,13 @@ extension DataFrame {
     }
 
     /// Buckets rows into fixed `interval` time windows along `dateColumn` and aggregates numeric columns (analogous to `df.resample`).
+    ///
+    /// - Parameters:
+    ///   - dateColumn: Name of the `.date` column to bucket by.
+    ///   - interval: Positive bucket duration in seconds.
+    ///   - aggregations: List of ``Aggregation`` specifications to evaluate per time bucket.
+    /// - Returns: A resampled and aggregated ``DataFrame``.
+    /// - Throws: ``DataFrameError`` if `interval` is not positive/finite, `aggregations` is empty, or `dateColumn` contains non-date values.
     public func resample(
         on dateColumn: String,
         interval: TimeInterval,
